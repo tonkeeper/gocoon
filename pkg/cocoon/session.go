@@ -133,6 +133,53 @@ func (s *Session) Query(_ context.Context, payload []byte) ([]byte, error) {
 	}
 }
 
+// SendMessage wraps payload in tcp.packet{data:bytes} and sends it as a frame.
+// Use this for messages such as client_runQueryEx whose responses arrive as
+// inbound packets rather than tcp.queryAnswer replies.
+func (s *Session) SendMessage(payload []byte) error {
+	var w tlWriter
+	w.u32(idTcpPacket)
+	w.bytes(payload)
+	return s.sendFrame(w.buf)
+}
+
+// RecvPacket reads the next inbound frame, transparently handling tcp.ping
+// keepalives. Unwraps tcp.packet and returns the inner data bytes.
+func (s *Session) RecvPacket() ([]byte, error) {
+	for {
+		frame, err := s.recvFrame()
+		if err != nil {
+			return nil, fmt.Errorf("recv frame: %w", err)
+		}
+		r := newTLReader(frame)
+		magic, err := r.u32()
+		if err != nil {
+			return nil, fmt.Errorf("read magic: %w", err)
+		}
+		switch magic {
+		case idTcpPing:
+			pingID, err := r.i64()
+			if err != nil {
+				return nil, fmt.Errorf("read ping id: %w", err)
+			}
+			var pw tlWriter
+			pw.u32(idTcpPong)
+			pw.i64(pingID)
+			if err := s.sendFrame(pw.buf); err != nil {
+				return nil, fmt.Errorf("send pong: %w", err)
+			}
+		case idTcpPacket:
+			data, err := r.rawBytes()
+			if err != nil {
+				return nil, fmt.Errorf("read tcp.packet data: %w", err)
+			}
+			return data, nil
+		default:
+			return nil, fmt.Errorf("unexpected tcp.Packet magic 0x%08x", magic)
+		}
+	}
+}
+
 // sendFrame writes [uint32 LE size][uint32 LE seqno][payload] to the connection.
 func (s *Session) sendFrame(payload []byte) error {
 	var hdr [8]byte

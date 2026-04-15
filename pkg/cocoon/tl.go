@@ -11,9 +11,10 @@ const (
 	idTcpConnected  uint32 = 0x636d41d6
 	idTcpPing       uint32 = 0xbbe9627c
 	idTcpPong       uint32 = 0x0bd4302c
-	idTcpQuery      uint32 = 0x3af51908
+	idTcpPacket      uint32 = 0x9c17baf8
+	idTcpQuery       uint32 = 0x3af51908
 	idTcpQueryAnswer uint32 = 0xc048c311
-	idTcpQueryError uint32 = 0x4cd2f602
+	idTcpQueryError  uint32 = 0x4cd2f602
 
 	// client.params#40fdca64 (explicit in schema)
 	idClientParams uint32 = 0x40fdca64

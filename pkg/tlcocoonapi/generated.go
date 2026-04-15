@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
+
 	"github.com/tonkeeper/tongo/tl"
 	"io"
 )
@@ -1741,11 +1743,9 @@ func (t ClientRunQueryRequest) MarshalTL() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, err = tl.Marshal(t.Timeout)
-	if err != nil {
-		return nil, err
-	}
-	_, err = buf.Write(b)
+	var timeoutBuf [8]byte
+	binary.LittleEndian.PutUint64(timeoutBuf[:], math.Float64bits(t.Timeout))
+	_, err = buf.Write(timeoutBuf[:])
 	if err != nil {
 		return nil, err
 	}
@@ -1834,11 +1834,9 @@ func (t ClientRunQueryExRequest) MarshalTL() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, err = tl.Marshal(t.Timeout)
-	if err != nil {
-		return nil, err
-	}
-	_, err = buf.Write(b)
+	var timeoutBuf2 [8]byte
+	binary.LittleEndian.PutUint64(timeoutBuf2[:], math.Float64bits(t.Timeout))
+	_, err = buf.Write(timeoutBuf2[:])
 	if err != nil {
 		return nil, err
 	}
@@ -1958,7 +1956,7 @@ func (c *Client) ClientGetWorkerTypesV2(ctx context.Context) (res ClientWorkerTy
 	if len(resp) < 4 {
 		return res, fmt.Errorf("not enough bytes for tag")
 	}
-	if binary.LittleEndian.Uint32(resp[:4]) != 0x23507a68 {
+	if binary.LittleEndian.Uint32(resp[:4]) != 0xcf0dc67 {
 		return res, fmt.Errorf("unexpected response tag")
 	}
 	err = tl.Unmarshal(bytes.NewReader(resp[4:]), &res)
