@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"strings"
 
@@ -172,8 +171,8 @@ func main() {
 
 	bodyJSON, err := json.Marshal(map[string]any{
 		"model":      testModel,
-		"messages":   []map[string]string{{"role": "user", "content": "1+1=?"}},
-		"max_tokens": 200,
+		"messages":   []map[string]string{{"role": "user", "content": "1+1=? (skip thinking)"}},
+		"max_tokens": 600,
 	})
 	if err != nil {
 		log.Fatalf("marshal query body: %v", err)
@@ -244,7 +243,23 @@ loop:
 			log.Fatalf("query error code=%d: %s", ans.ClientQueryAnswerErrorEx.ErrorCode, ans.ClientQueryAnswerErrorEx.Error)
 		}
 	}
-	fmt.Printf("Answer:\n%s\n", answerBuf)
+	idx := bytes.Index(answerBuf, []byte("{"))
+	if idx < 0 {
+		log.Fatalf("JSON not found in answer:\n%s", answerBuf)
+	}
+	var completion struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(answerBuf[idx:], &completion); err != nil {
+		log.Fatalf("parse completion JSON: %v\nraw: %s", err, answerBuf[idx:])
+	}
+	if len(completion.Choices) > 0 {
+		fmt.Println(completion.Choices[0].Message.Content)
+	}
 }
 
 // clientAddr extracts the client-facing address from a RegisteredProxy address
@@ -333,94 +348,8 @@ func buildQueryBytes(body []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func randInt256() (tl.Int256, error) {
 	var id tl.Int256
 	_, err := rand.Read(id[:])
 	return id, err
-}
-
-// httpResponsePayload parses a boxed TL http.response and returns its payload bytes.
-// Layout: [tag u32][http_version str][status_code i32][reason str][headers vec][payload bytes]
-// TON TL vectors: [count u32][bare elements...] — no magic prefix.
-func httpResponsePayload(data []byte) ([]byte, error) {
-	r := bytes.NewReader(data)
-
-	var tag uint32
-	if err := binary.Read(r, binary.LittleEndian, &tag); err != nil {
-		return nil, fmt.Errorf("read tag: %w", err)
-	}
-	if tag != 0x1cd4212b { // http.response ID = 483443755
-		return nil, fmt.Errorf("unexpected tag 0x%08x", tag)
-	}
-
-	// http_version
-	if _, err := tlReadString(r); err != nil {
-		return nil, fmt.Errorf("http_version: %w", err)
-	}
-	// status_code
-	if err := binary.Read(r, binary.LittleEndian, new(int32)); err != nil {
-		return nil, fmt.Errorf("status_code: %w", err)
-	}
-	// reason
-	if _, err := tlReadString(r); err != nil {
-		return nil, fmt.Errorf("reason: %w", err)
-	}
-	// headers: count + bare http.header elements (name, value)
-	var count uint32
-	if err := binary.Read(r, binary.LittleEndian, &count); err != nil {
-		return nil, fmt.Errorf("headers count: %w", err)
-	}
-	for i := uint32(0); i < count; i++ {
-		if _, err := tlReadString(r); err != nil {
-			return nil, fmt.Errorf("header name: %w", err)
-		}
-		if _, err := tlReadString(r); err != nil {
-			return nil, fmt.Errorf("header value: %w", err)
-		}
-	}
-	// payload
-	return tlReadBytes(r)
-}
-
-func tlReadString(r *bytes.Reader) (string, error) {
-	b, err := tlReadBytes(r)
-	return string(b), err
-}
-
-func tlReadBytes(r *bytes.Reader) ([]byte, error) {
-	first, err := r.ReadByte()
-	if err != nil {
-		return nil, err
-	}
-	var length, pad int
-	if first < 254 {
-		length = int(first)
-		pad = (4 - (1+length)%4) % 4
-	} else if first == 254 {
-		var b [3]byte
-		if _, err := io.ReadFull(r, b[:]); err != nil {
-			return nil, err
-		}
-		length = int(b[0]) | int(b[1])<<8 | int(b[2])<<16
-		pad = (4 - length%4) % 4
-	} else {
-		return nil, fmt.Errorf("unsupported TL bytes prefix 0x%02x", first)
-	}
-	data := make([]byte, length)
-	if _, err := io.ReadFull(r, data); err != nil {
-		return nil, err
-	}
-	if pad > 0 {
-		if _, err := io.ReadFull(r, make([]byte, pad)); err != nil {
-			return nil, err
-		}
-	}
-	return data, nil
 }
