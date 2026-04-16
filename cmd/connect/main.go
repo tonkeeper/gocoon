@@ -3,249 +3,102 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/tls"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
-	"strings"
+	"os"
 
-	tongo "github.com/tonkeeper/tongo"
-	abiCocoon "github.com/tonkeeper/tongo/abi-tolk/abiGenerated/cocoon"
-	"github.com/tonkeeper/tongo/liteapi"
-	"github.com/tonkeeper/tongo/tl"
+	tonapi "github.com/tonkeeper/tonapi-go"
+	"github.com/tonkeeper/tongo/ton"
+	"go.uber.org/zap"
 
-	"github.com/tonkeeper/gococoon/pkg/cocoon"
-	"github.com/tonkeeper/gococoon/pkg/tlcocoonapi"
+	goclient "github.com/tonkeeper/gococoon/pkg/client"
+	"github.com/tonkeeper/gococoon/pkg/wallet"
 )
 
-const rootContractAddr = "EQCns7bYSp0igFvS1wpb5wsZjCKCV19MD5AVzI4EyxsnU73k"
-
 func main() {
-	ownerAddr := flag.String("owner", "UQD8tvSwKYOC0TQi-H2tgry_JlQbkPl_EARYnA4ejZgaTqI9", "client owner TON address (any valid address)")
 	secretStr := flag.String("secret", "", "secret string for short auth")
+	tonapiKey := flag.String("tonapi-key", "", "tonapi.io API key (optional, increases rate limits)")
 	flag.Parse()
 
-	// 1. Connect to TON mainnet and read registered proxies from root contract.
-	client, err := liteapi.NewClientWithDefaultMainnet()
-	if err != nil {
-		log.Fatalf("create liteapi client: %v", err)
-	}
-
-	rootAddr := tongo.MustParseAddress(rootContractAddr)
-	rootClient := abiCocoon.NewCocoonRoot(client, client).WithAccountId(rootAddr.ID)
+	logger := zap.Must(zap.NewDevelopment())
+	defer logger.Sync() //nolint:errcheck
 
 	ctx := context.Background()
-	rootStore, err := rootClient.Storage(ctx)
+
+	ownerAddr := os.Getenv("OWNER_ADDRESS")
+	if ownerAddr == "" {
+		ownerAddr = "UQD8tvSwKYOC0TQi-H2tgry_JlQbkPl_EARYnA4ejZgaTqI9"
+		//logger.Fatal("OWNER_ADDRESS environment variable is not set")
+	}
+
+	var priv ed25519.PrivateKey
+	if seed := os.Getenv("PRIVATE_KEY"); seed != "" {
+		raw, err := hex.DecodeString(seed)
+		if err != nil || len(raw) != ed25519.SeedSize {
+			logger.Fatal("PRIVATE_KEY must be a 64-char hex string (32-byte Ed25519 seed)")
+		}
+		priv = ed25519.NewKeyFromSeed(raw)
+	} else {
+		_, generated, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			logger.Fatal("generate ed25519 key", zap.Error(err))
+		}
+		priv = generated
+		fmt.Fprintf(os.Stderr, "generated new key — set PRIVATE_KEY=%s to reuse it\n",
+			hex.EncodeToString(priv.Seed()))
+	}
+
+	walletAddrStr := os.Getenv("WALLET_ADDRESS")
+	if walletAddrStr == "" {
+		walletAddrStr = "UQD_5KYZHQcUIhBJhPQ0n3Fpg7l2qqE6Wc5W2tMeAypMfm0C"
+	}
+	walletAddr, err := ton.ParseAccountID(walletAddrStr)
 	if err != nil {
-		log.Fatalf("get root storage: %v", err)
+		logger.Fatal("invalid WALLET_ADDRESS", zap.Error(err))
 	}
 
-	proxies := rootStore.Data.Value.RegisteredProxies.Values()
-	if len(proxies) == 0 {
-		log.Fatal("no registered proxies in root contract")
-	}
-
-	fmt.Printf("Registered proxies (%d):\n", len(proxies))
-	for i, p := range proxies {
-		fmt.Printf("  [%d] %s\n", i, p.Address)
-	}
-
-	// Address format: "worker_addr client_addr" (space-separated) or single addr.
-	proxyAddr := clientAddr(proxies[0].Address)
-	fmt.Printf("\nConnecting to proxy: %s\n", proxyAddr)
-
-	// 2. Solve PoW and establish mutual TLS with an ephemeral Ed25519 cert.
-	conn, err := cocoon.Dial(proxyAddr)
+	w, err := wallet.New(priv, ownerAddr)
 	if err != nil {
-		log.Fatalf("connect: %v", err)
+		logger.Fatal("wallet", zap.Error(err))
+	}
+	w.SetAddress(walletAddr)
+	logger.Info("wallet address", zap.String("address", w.Address.ToHuman(false, false)))
+
+	sender, err := tonapi.NewClient(tonapi.TonApiURL, tonapi.WithToken(*tonapiKey))
+	if err != nil {
+		logger.Fatal("create tonapi client", zap.Error(err))
+	}
+
+	cc := goclient.NewCocoonClient(w, sender, goclient.Opts{}.WithSecret(*secretStr))
+	conn, err := cc.Connect(ctx, logger)
+	if err != nil {
+		logger.Fatal("connect", zap.Error(err))
 	}
 	defer conn.Close()
 
-	state := conn.ConnectionState()
-	fmt.Printf("Connected!\n")
-	fmt.Printf("  TLS version:  %s\n", tlsVersionName(state.Version))
-	fmt.Printf("  Cipher suite: %s\n", tls.CipherSuiteName(state.CipherSuite))
-	fmt.Printf("  Server cert:  %d bytes (TDX quote embedded)\n", len(conn.ServerCert))
-
-	// 3. Start TcpConnection session (sends tcp.connect framing packet).
-	sess, err := cocoon.NewSession(conn)
-	if err != nil {
-		log.Fatalf("new session: %v", err)
-	}
-
-	// 4. Build the API client with the session as transport.
-	apiClient := tlcocoonapi.NewClient(sess.Query)
-
-	// 5. Send client.connectToProxy handshake.
-	rootVersion := uint32(rootStore.Version)
-	handshakeReq := tlcocoonapi.ClientConnectToProxyRequest{
-		Params: tlcocoonapi.ClientParamsC{
-			// flags=3: bit0=is_test present, bit1=proto versions present
-			Flags:              3,
-			ClientOwnerAddress: *ownerAddr,
-			IsTest:             boolPtr(false),
-			MinProtoVersion:    uint32Ptr(1),
-			MaxProtoVersion:    uint32Ptr(1),
-		},
-		MinConfigVersion: rootVersion,
-	}
-
-	fmt.Printf("\nSending client.connectToProxy (root version=%d)...\n", rootVersion)
-	resp, err := apiClient.ClientConnectToProxy(ctx, handshakeReq)
-	if err != nil {
-		log.Fatalf("connectToProxy: %v", err)
-	}
-
-	fmt.Printf("client.connectedToProxy received!\n")
-	fmt.Printf("  Proxy owner:    %s\n", resp.Params.ProxyOwnerAddress)
-	fmt.Printf("  Proxy SC:       %s\n", resp.Params.ProxyScAddress)
-	fmt.Printf("  Client SC:      %s\n", resp.ClientScAddress)
-	fmt.Printf("  Proto version:  %v\n", derefUint32(resp.Params.ProtoVersion))
-	pubkey := resp.Params.ProxyPublicKey
-	fmt.Printf("  Proxy pubkey:   %s\n", hex.EncodeToString(pubkey[:]))
-
-	// 6. Authorize the connection before sending any client requests.
-	auth := resp.Auth
-	switch auth.SumType {
-	case "ClientProxyConnectionAuthShort":
-		short := auth.ClientProxyConnectionAuthShort
-		fmt.Printf("\nAuth type: short (secret_hash=%s nonce=%d)\n",
-			hex.EncodeToString(short.SecretHash[:]), short.Nonce)
-		authResp, err := apiClient.ClientAuthorizeWithProxyShort(ctx,
-			tlcocoonapi.ClientAuthorizeWithProxyShortRequest{Data: []byte(*secretStr)})
-		if err != nil {
-			log.Fatalf("authorizeWithProxyShort: %v", err)
-		}
-		if !printAuthResult(authResp) {
-			log.Fatal("authorization failed — cannot continue")
-		}
-
-	case "ClientProxyConnectionAuthLong":
-		long := auth.ClientProxyConnectionAuthLong
-		fmt.Printf("\nAuth type: long (nonce=%d)\n", long.Nonce)
-		fmt.Println("Long auth requires a blockchain transaction — skipping for this demo.")
-		// In production: send TON tx to proxy SC, then call ClientAuthorizeWithProxyLong.
-		return
-
-	default:
-		log.Fatalf("unknown auth type: %q", auth.SumType)
-	}
-
-	// 7. Fetch available models from the proxy.
-	protoVersion := derefUint32(resp.Params.ProtoVersion)
-	fmt.Printf("\nFetching models (proto_version=%d)...\n", protoVersion)
-	if protoVersion != 0 {
-		models, err := apiClient.ClientGetWorkerTypesV2(ctx)
-		if err != nil {
-			log.Fatalf("getWorkerTypesV2: %v", err)
-		}
-		fmt.Printf("Models (%d):\n", len(models.Types))
-		for _, wt := range models.Types {
-			fmt.Printf("  %s (%d workers)\n", wt.Name, len(wt.Workers))
-			for _, w := range wt.Workers {
-				fmt.Printf("    coefficient=%d active=%d/%d\n",
-					w.Coefficient, w.ActiveRequests, w.MaxActiveRequests)
-			}
-		}
-	} else {
-		models, err := apiClient.ClientGetWorkerTypes(ctx)
-		if err != nil {
-			log.Fatalf("getWorkerTypes: %v", err)
-		}
-		fmt.Printf("Models (%d):\n", len(models.Types))
-		for _, wt := range models.Types {
-			fmt.Printf("  %s active=%d coeff=[%d..%d] p50=%d\n",
-				wt.Name, wt.ActiveWorkers,
-				wt.CoefficientMin, wt.CoefficientMax, wt.CoefficientBucket50)
-		}
-	}
-
-	// 8. Send a test query as a message (not tcp.query — proxy routes runQueryEx
-	//    via receive_message, not receive_query).
 	const testModel = "Qwen/Qwen3-32B"
-	fmt.Printf("\nRunning query model=%s prompt=\"1+1=?\"...\n", testModel)
-
 	bodyJSON, err := json.Marshal(map[string]any{
 		"model":      testModel,
 		"messages":   []map[string]string{{"role": "user", "content": "1+1=? (skip thinking)"}},
 		"max_tokens": 600,
 	})
 	if err != nil {
-		log.Fatalf("marshal query body: %v", err)
-	}
-	queryBytes, err := buildQueryBytes(bodyJSON)
-	if err != nil {
-		log.Fatalf("build query bytes: %v", err)
-	}
-	reqID, err := randInt256()
-	if err != nil {
-		log.Fatalf("rand request id: %v", err)
+		logger.Fatal("marshal query body", zap.Error(err))
 	}
 
-	msgPayload, err := tl.Marshal(struct {
-		tl.SumType
-		Req tlcocoonapi.ClientRunQueryExRequest `tlSumType:"f54cb74b"`
-	}{SumType: "Req", Req: tlcocoonapi.ClientRunQueryExRequest{
-		ModelName:        testModel,
-		Query:            queryBytes,
-		MaxCoefficient:   100000,
-		MaxTokens:        200,
-		Timeout:          30.0,
-		RequestId:        reqID,
-		MinConfigVersion: rootVersion,
-		Flags:            0,
-	}})
+	logger.Info("running query", zap.String("model", testModel))
+	resp, err := conn.POST(ctx, testModel, "/v1/chat/completions", bodyJSON)
 	if err != nil {
-		log.Fatalf("marshal runQueryEx: %v", err)
-	}
-	if err := sess.SendMessage(msgPayload); err != nil {
-		log.Fatalf("send runQueryEx: %v", err)
+		logger.Fatal("POST", zap.Error(err))
 	}
 
-	// Receive answer packets, correlating by request_id.
-	var answerBuf []byte
-loop:
-	for {
-		pkt, err := sess.RecvPacket()
-		if err != nil {
-			log.Fatalf("recv packet: %v", err)
-		}
-		var ans tlcocoonapi.ClientQueryAnswerEx
-		if err := tl.Unmarshal(bytes.NewReader(pkt), &ans); err != nil {
-			log.Printf("unrecognised packet (len=%d), skipping: %v", len(pkt), err)
-			continue
-		}
-		switch ans.SumType {
-		case "ClientQueryAnswerEx":
-			if ans.ClientQueryAnswerEx.RequestId != reqID {
-				continue
-			}
-			answerBuf = append(answerBuf, ans.ClientQueryAnswerEx.Answer...)
-			if ans.ClientQueryAnswerEx.Flags&1 == 1 {
-				break loop
-			}
-		case "ClientQueryAnswerPartEx":
-			if ans.ClientQueryAnswerPartEx.RequestId != reqID {
-				continue
-			}
-			answerBuf = append(answerBuf, ans.ClientQueryAnswerPartEx.Answer...)
-			if ans.ClientQueryAnswerPartEx.Flags&1 == 1 {
-				break loop
-			}
-		case "ClientQueryAnswerErrorEx":
-			if ans.ClientQueryAnswerErrorEx.RequestId != reqID {
-				continue
-			}
-			log.Fatalf("query error code=%d: %s", ans.ClientQueryAnswerErrorEx.ErrorCode, ans.ClientQueryAnswerErrorEx.Error)
-		}
-	}
-	idx := bytes.Index(answerBuf, []byte("{"))
+	idx := bytes.Index(resp, []byte("{"))
 	if idx < 0 {
-		log.Fatalf("JSON not found in answer:\n%s", answerBuf)
+		logger.Fatal("JSON not found in response", zap.ByteString("resp", resp))
 	}
 	var completion struct {
 		Choices []struct {
@@ -254,102 +107,10 @@ loop:
 			} `json:"message"`
 		} `json:"choices"`
 	}
-	if err := json.Unmarshal(answerBuf[idx:], &completion); err != nil {
-		log.Fatalf("parse completion JSON: %v\nraw: %s", err, answerBuf[idx:])
+	if err := json.Unmarshal(resp[idx:], &completion); err != nil {
+		logger.Fatal("parse completion JSON", zap.Error(err))
 	}
 	if len(completion.Choices) > 0 {
 		fmt.Println(completion.Choices[0].Message.Content)
 	}
-}
-
-// clientAddr extracts the client-facing address from a RegisteredProxy address
-// string. Format is "worker_addr client_addr" or just "addr" if both are same.
-func clientAddr(addr string) string {
-	parts := strings.Fields(addr)
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return parts[0]
-}
-
-func tlsVersionName(v uint16) string {
-	switch v {
-	case 0x0304:
-		return "TLS 1.3"
-	case 0x0303:
-		return "TLS 1.2"
-	default:
-		return fmt.Sprintf("0x%04x", v)
-	}
-}
-
-// printAuthResult prints the auth result and returns true on success.
-func printAuthResult(r tlcocoonapi.ClientAuthorizationWithProxy) bool {
-	switch r.SumType {
-	case "ClientAuthorizationWithProxySuccess":
-		s := r.ClientAuthorizationWithProxySuccess
-		fmt.Printf("Auth success! tokens_committed=%d max_tokens=%d\n",
-			s.TokensCommittedToDb, s.MaxTokens)
-		return true
-	case "ClientAuthorizationWithProxyFailed":
-		f := r.ClientAuthorizationWithProxyFailed
-		fmt.Printf("Auth failed: code=%d %s\n", f.ErrorCode, f.Error)
-		return false
-	default:
-		fmt.Printf("Unknown auth result: %q\n", r.SumType)
-		return false
-	}
-}
-
-func boolPtr(v bool) *bool       { return &v }
-func uint32Ptr(v uint32) *uint32 { return &v }
-func derefUint32(p *uint32) uint32 {
-	if p == nil {
-		return 0
-	}
-	return *p
-}
-
-// buildQueryBytes returns a boxed TL-serialized http.request for POST /v1/chat/completions.
-// Layout: [tag u32][method][url][http_version][vector<http.header>][payload]
-// http.header elements are bare (no per-element tag) as per cocoon TL codegen.
-func buildQueryBytes(body []byte) ([]byte, error) {
-	buf := new(bytes.Buffer)
-
-	// boxed http.request tag = 1195978213 (0x47492DE5)
-	binary.Write(buf, binary.LittleEndian, uint32(1195978213))
-
-	for _, s := range []string{"POST", "/v1/chat/completions", "HTTP/1.1"} {
-		b, err := tl.Marshal(s)
-		if err != nil {
-			return nil, err
-		}
-		buf.Write(b)
-	}
-
-	// vector<http.header>: count + bare elements (name, value).
-	// TON TL vectors have no magic prefix — just count followed by elements.
-	binary.Write(buf, binary.LittleEndian, uint32(1)) // 1 header
-	for _, s := range []string{"Content-Type", "application/json"} {
-		b, err := tl.Marshal(s)
-		if err != nil {
-			return nil, err
-		}
-		buf.Write(b)
-	}
-
-	// payload bytes
-	b, err := tl.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	buf.Write(b)
-
-	return buf.Bytes(), nil
-}
-
-func randInt256() (tl.Int256, error) {
-	var id tl.Int256
-	_, err := rand.Read(id[:])
-	return id, err
 }

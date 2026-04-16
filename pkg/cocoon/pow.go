@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/bits"
+	"time"
 )
 
 const (
@@ -56,7 +57,8 @@ func leadingZeroBits(h []byte) int {
 
 // solvePow finds a nonce such that SHA256(salt || nonce_le64) has at least
 // difficulty leading zero bits (using the server's little-endian convention).
-func solvePow(c PowChallenge) int64 {
+func solvePow(c PowChallenge) (int64, time.Duration) {
+	start := time.Now()
 	var data [24]byte
 	copy(data[:16], c.Salt[:])
 	var nonce int64
@@ -64,7 +66,7 @@ func solvePow(c PowChallenge) int64 {
 		binary.LittleEndian.PutUint64(data[16:], uint64(nonce))
 		h := sha256.Sum256(data[:])
 		if leadingZeroBits(h[:]) >= int(c.Difficulty) {
-			return nonce
+			return nonce, time.Since(start)
 		}
 		nonce++
 	}

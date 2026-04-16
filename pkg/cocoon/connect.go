@@ -13,6 +13,8 @@ import (
 	"math/big"
 	"net"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // Conn is an established cocoon proxy connection (post-PoW, post-TLS).
@@ -28,28 +30,35 @@ type Conn struct {
 //
 // The server uses policy "any" for client certificates, so no TDX
 // attestation is required — any valid Ed25519 self-signed cert works.
-func Dial(addr string) (*Conn, error) {
+func Dial(addr string, logger *zap.Logger) (*Conn, error) {
 	clientCert, err := generateEphemeralCert()
 	if err != nil {
 		return nil, fmt.Errorf("generate cert: %w", err)
 	}
-	return DialWithCert(addr, clientCert)
+	return DialWithCert(addr, clientCert, logger)
 }
 
 // DialWithCert is like Dial but uses a pre-generated TLS certificate.
-func DialWithCert(addr string, clientCert tls.Certificate) (*Conn, error) {
-	tcp, err := net.DialTimeout("tcp", addr, 15*time.Second)
+func DialWithCert(addr string, clientCert tls.Certificate, logger *zap.Logger) (*Conn, error) {
+	logger.Debug("connecting to cocoon proxy", zap.String("addr", addr))
+	tcp, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("tcp dial %s: %w", addr, err)
 	}
 
 	// Step 1: solve PoW
+	logger.Debug("reading PoW challenge")
 	challenge, err := readPowChallenge(tcp)
 	if err != nil {
 		tcp.Close()
 		return nil, err
 	}
-	nonce := solvePow(challenge)
+	logger.Debug("got PoW challenge", zap.Any("challenge", challenge))
+	nonce, timeSpent := solvePow(challenge)
+	logger.Debug("solving PoW response",
+		zap.Duration("spent", timeSpent),
+		zap.Int32("complexity", challenge.Difficulty),
+	)
 	if err := sendPowResponse(tcp, nonce); err != nil {
 		tcp.Close()
 		return nil, fmt.Errorf("send pow response: %w", err)
@@ -60,9 +69,9 @@ func DialWithCert(addr string, clientCert tls.Certificate) (*Conn, error) {
 	// The server's identity is verified via TDX attestation embedded in the
 	// X.509 extensions — handled separately by VerifyServerCert if needed.
 	tlsCfg := &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-		Certificates:       []tls.Certificate{clientCert},
+		MinVersion:             tls.VersionTLS13,
+		InsecureSkipVerify:     true,
+		Certificates:           []tls.Certificate{clientCert},
 		SessionTicketsDisabled: true,
 	}
 	tlsConn := tls.Client(tcp, tlsCfg)
