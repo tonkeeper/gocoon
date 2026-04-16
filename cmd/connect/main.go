@@ -31,12 +31,10 @@ func main() {
 
 	ownerAddrStr := os.Getenv("OWNER_ADDRESS")
 	if ownerAddrStr == "" {
-		ownerAddrStr = "UQD8tvSwKYOC0TQi-H2tgry_JlQbkPl_EARYnA4ejZgaTqI9"
+		ownerAddrStr = "UQCFsVc8MnJ6PwU6Li8EFX1vplzc0f4GREt9UsyKNSdxRph4"
+		//ownerAddrStr = "EQCB2xmOW5UsLnnOioX_FXDhAuFxKDtCF5G1BIJejLbAAWOs"
 	}
-	ownerAddr, err := ton.ParseAccountID(ownerAddrStr)
-	if err != nil {
-		logger.Fatal("invalid OWNER_ADDRESS", zap.Error(err))
-	}
+	ownerAddr := ton.MustParseAccountID(ownerAddrStr)
 
 	var priv ed25519.PrivateKey
 	if seed := os.Getenv("PRIVATE_KEY"); seed != "" {
@@ -55,16 +53,19 @@ func main() {
 			hex.EncodeToString(priv.Seed()))
 	}
 
-	walletAddrStr := os.Getenv("WALLET_ADDRESS")
-	if walletAddrStr == "" {
-		walletAddrStr = "UQD_5KYZHQcUIhBJhPQ0n3Fpg7l2qqE6Wc5W2tMeAypMfm0C"
-	}
-	walletAddr, err := ton.ParseAccountID(walletAddrStr)
-	if err != nil {
-		logger.Fatal("invalid WALLET_ADDRESS", zap.Error(err))
-	}
+	//walletAddrStr := os.Getenv("WALLET_ADDRESS")
+	//if walletAddrStr == "" {
+	//	walletAddrStr = "UQD_5KYZHQcUIhBJhPQ0n3Fpg7l2qqE6Wc5W2tMeAypMfm0C"
+	//}
+	//walletAddr, err := ton.ParseAccountID(walletAddrStr)
+	//if err != nil {
+	//	logger.Fatal("invalid WALLET_ADDRESS", zap.Error(err))
+	//}
 
-	w := wallet.New(walletAddr, ownerAddr, priv)
+	w, err := wallet.Generate(priv, ownerAddr)
+	if err != nil {
+		logger.Fatal("generate wallet", zap.Error(err))
+	}
 	logger.Info("wallet address", zap.String("address", w.Address.ToHuman(false, false)))
 
 	sender, err := tonapi.NewClient(tonapi.TonApiURL, tonapi.WithToken(*tonapiKey))
@@ -82,8 +83,8 @@ func main() {
 	const testModel = "Qwen/Qwen3-32B"
 	bodyJSON, err := json.Marshal(map[string]any{
 		"model":      testModel,
-		"messages":   []map[string]string{{"role": "user", "content": "1+1=? (skip thinking)"}},
-		"max_tokens": 600,
+		"messages":   []map[string]string{{"role": "user", "content": "Tell me latest news about TON"}},
+		"max_tokens": 1200,
 	})
 	if err != nil {
 		logger.Fatal("marshal query body", zap.Error(err))

@@ -145,7 +145,15 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 			conn.Close()
 			return nil, fmt.Errorf("parse client SC address: %w", err)
 		}
-		if err := wallet.SendRegisterTx(ctx, lc, c.w, clientScAddr, long.Nonce, c.sender, logger); err != nil {
+
+		proxtAddr := ton.MustParseAccountID(resp.Params.ProxyScAddress)
+
+		if err := wallet.SendRegisterTx(ctx, lc, c.w, clientScAddr, long.Nonce, c.sender,
+			rootStore.Params.Value.ClientScCode, c.opts.secret, logger, proxtAddr,
+			resp.Params.ProxyPublicKey,
+			rootStore.Params.Value.MinClientStake,
+			rootStore.Params.Value,
+		); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("send register tx: %w", err)
 		}
