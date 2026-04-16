@@ -28,10 +28,6 @@ var Code = boc.MustDeserializeSinglRootHex(`b5ee9c724102110100024b000114ff00f4a4
 // hardcoded contract code and the wallet's public key / owner address.
 // The hash of the returned cell is the wallet SC address on workchain 0.
 func BuildStateInit(w *Wallet) (*tlb.StateInitT[*abiCocoon.WalletStorage], error) {
-	ownerAccID, err := ton.ParseAccountID(w.OwnerAddress)
-	if err != nil {
-		return nil, fmt.Errorf("parse owner address: %w", err)
-	}
 	return &tlb.StateInitT[*abiCocoon.WalletStorage]{
 		Code: tlb.Maybe[tlb.Ref[boc.Cell]]{
 			Exists: true,
@@ -46,8 +42,8 @@ func BuildStateInit(w *Wallet) (*tlb.StateInitT[*abiCocoon.WalletStorage], error
 					PublicKey:   tlb.Uint256(*new(big.Int).SetBytes(w.PublicKey)),
 					Status:      0,
 					OwnerAddress: tlb.InternalAddress{
-						Workchain: int8(ownerAccID.Workchain),
-						Address:   ownerAccID.Address,
+						Workchain: int8(w.OwnerAddress.Workchain),
+						Address:   w.OwnerAddress.Address,
 					},
 				},
 			},
@@ -58,17 +54,7 @@ func BuildStateInit(w *Wallet) (*tlb.StateInitT[*abiCocoon.WalletStorage], error
 // SendRegisterTx builds and broadcasts the OwnerClientRegister internal message
 // from the cocoon wallet SC to the client SC, triggering the on-chain registration
 // that long auth waits for.
-func SendRegisterTx(ctx context.Context, lc *liteapi.Client, w *Wallet, clientScAddrStr string, nonce uint64, sender BlockchainSender, logger *zap.Logger) error {
-	clientScAddr, err := ton.ParseAccountID(clientScAddrStr)
-	if err != nil {
-		return fmt.Errorf("parse client SC address: %w", err)
-	}
-
-	ownerAccID, err := ton.ParseAccountID(w.OwnerAddress)
-	if err != nil {
-		return fmt.Errorf("parse owner address: %w", err)
-	}
-
+func SendRegisterTx(ctx context.Context, lc *liteapi.Client, w *Wallet, clientScAddr ton.AccountID, nonce uint64, sender BlockchainSender, logger *zap.Logger) error {
 	// Determine current seqno; detect whether wallet SC is already deployed.
 	var seqno uint32
 	var needInit bool
@@ -84,8 +70,8 @@ func SendRegisterTx(ctx context.Context, lc *liteapi.Client, w *Wallet, clientSc
 		QueryId: 0,
 		Nonce:   tlb.Uint64(nonce),
 		SendExcessesTo: tlb.InternalAddress{
-			Workchain: int8(ownerAccID.Workchain),
-			Address:   tlb.Bits256(ownerAccID.Address),
+			Workchain: int8(w.OwnerAddress.Workchain),
+			Address:   tlb.Bits256(w.OwnerAddress.Address),
 		},
 	}.ToInternal(
 		tlb.InternalAddress{

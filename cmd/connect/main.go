@@ -29,10 +29,13 @@ func main() {
 
 	ctx := context.Background()
 
-	ownerAddr := os.Getenv("OWNER_ADDRESS")
-	if ownerAddr == "" {
-		ownerAddr = "UQD8tvSwKYOC0TQi-H2tgry_JlQbkPl_EARYnA4ejZgaTqI9"
-		//logger.Fatal("OWNER_ADDRESS environment variable is not set")
+	ownerAddrStr := os.Getenv("OWNER_ADDRESS")
+	if ownerAddrStr == "" {
+		ownerAddrStr = "UQD8tvSwKYOC0TQi-H2tgry_JlQbkPl_EARYnA4ejZgaTqI9"
+	}
+	ownerAddr, err := ton.ParseAccountID(ownerAddrStr)
+	if err != nil {
+		logger.Fatal("invalid OWNER_ADDRESS", zap.Error(err))
 	}
 
 	var priv ed25519.PrivateKey
@@ -61,11 +64,7 @@ func main() {
 		logger.Fatal("invalid WALLET_ADDRESS", zap.Error(err))
 	}
 
-	w, err := wallet.New(priv, ownerAddr)
-	if err != nil {
-		logger.Fatal("wallet", zap.Error(err))
-	}
-	w.SetAddress(walletAddr)
+	w := wallet.New(walletAddr, ownerAddr, priv)
 	logger.Info("wallet address", zap.String("address", w.Address.ToHuman(false, false)))
 
 	sender, err := tonapi.NewClient(tonapi.TonApiURL, tonapi.WithToken(*tonapiKey))

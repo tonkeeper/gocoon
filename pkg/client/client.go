@@ -100,7 +100,7 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 	resp, err := apiClient.ClientConnectToProxy(ctx, tlcocoonapi.ClientConnectToProxyRequest{
 		Params: tlcocoonapi.ClientParamsC{
 			Flags:              3, // bit0=is_test, bit1=proto versions
-			ClientOwnerAddress: c.w.OwnerAddress,
+			ClientOwnerAddress: c.w.OwnerAddress.ToHuman(false, false),
 			IsTest:             boolPtr(false),
 			MinProtoVersion:    uint32Ptr(1),
 			MaxProtoVersion:    uint32Ptr(1),
@@ -140,7 +140,12 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 	case "ClientProxyConnectionAuthLong":
 		long := auth.ClientProxyConnectionAuthLong
 		logger.Info("auth type: long", zap.Uint64("nonce", long.Nonce))
-		if err := wallet.SendRegisterTx(ctx, lc, c.w, resp.ClientScAddress, long.Nonce, c.sender, logger); err != nil {
+		clientScAddr, err := ton.ParseAccountID(resp.ClientScAddress)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("parse client SC address: %w", err)
+		}
+		if err := wallet.SendRegisterTx(ctx, lc, c.w, clientScAddr, long.Nonce, c.sender, logger); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("send register tx: %w", err)
 		}
