@@ -66,7 +66,7 @@ func cmdRootState() {
 	fmt.Printf("  ClientDelayBeforeClose:         %v\n", curParams.ClientDelayBeforeClose)
 	fmt.Printf("  MinProxyStake:                  %v\n", curParams.MinProxyStake)
 	fmt.Printf("  MinClientStake:                 %v\n", curParams.MinClientStake)
-	fmt.Printf("  ProxyCodeHash:                  %v\n", curParams.ProxyCodeHash)
-	fmt.Printf("  WorkerCodeHash:                 %v\n", curParams.WorkerCodeHash)
-	fmt.Printf("  ClientCodeHash:                 %v\n", curParams.ClientCodeHash)
+	fmt.Printf("  ProxyCodeHash:                  %v\n", curParams.ProxyCodeHash.HexString())
+	fmt.Printf("  WorkerCodeHash:                 %v\n", curParams.WorkerCodeHash.HexString())
+	fmt.Printf("  ClientCodeHash:                 %v\n", curParams.ClientCodeHash.HexString())
 }
