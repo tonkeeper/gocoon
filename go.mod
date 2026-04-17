@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	github.com/tonkeeper/tonapi-go v1.0.1
-	github.com/tonkeeper/tongo v1.19.1-0.20260417131203-ac18e512b000
+	github.com/tonkeeper/tongo v1.19.1-0.20260417135212-97ef83ef6640
 	go.uber.org/zap v1.27.1
 )
 

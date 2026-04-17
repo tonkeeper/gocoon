@@ -2,27 +2,29 @@ package client
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"math/big"
-	"math/rand/v2"
 	"strings"
 	"time"
 
 	"github.com/tonkeeper/tongo"
 	abiCocoon "github.com/tonkeeper/tongo/abi-tolk/abiGenerated/cocoon"
-	"github.com/tonkeeper/tongo/liteapi"
-	"github.com/tonkeeper/tongo/tl"
 	"github.com/tonkeeper/tongo/tlb"
 	"github.com/tonkeeper/tongo/ton"
 	"go.uber.org/zap"
 
+	"github.com/tonkeeper/gocoon/pkg/client/contract"
 	"github.com/tonkeeper/gocoon/pkg/cocoon"
 	"github.com/tonkeeper/gocoon/pkg/tlcocoonapi"
 )
 
-const defaultRootAddr = "EQCns7bYSp0igFvS1wpb5wsZjCKCV19MD5AVzI4EyxsnU73k"
+var defaultRootAddr = tongo.MustParseAddress("EQCns7bYSp0igFvS1wpb5wsZjCKCV19MD5AVzI4EyxsnU73k")
+
+// LiteClient is the minimal TON liteapi interface the client needs.
+type LiteClient interface {
+	RunSmcMethodByID(ctx context.Context, accountID ton.AccountID, methodID int, params tlb.VmStack) (uint32, tlb.VmStack, error)
+	GetAccountState(ctx context.Context, accountID ton.AccountID) (tlb.ShardAccount, error)
+}
 
 // Wallet is the subset of cocoonWallet.Wallet used by the client.
 type Wallet interface {
@@ -49,28 +51,24 @@ func (o Opts) WithSecret(secret string) Opts {
 // CocoonClient connects to a cocoon proxy and handles the full auth flow.
 type CocoonClient struct {
 	w    Wallet
+	lc   LiteClient
 	opts Opts
 }
 
-// NewCocoonClient creates a client for the given wallet identity.
+// NewCocoonClient creates a client for the given wallet and liteapi client.
 // opts is optional — call Opts{}.WithSecret(...) etc. to configure.
 // Root address defaults to the production cocoon root contract.
-func NewCocoonClient(w Wallet, opts Opts) *CocoonClient {
+func NewCocoonClient(w Wallet, lc LiteClient, opts Opts) *CocoonClient {
 	if (opts.rootAddress == ton.AccountID{}) {
-		opts.rootAddress = tongo.MustParseAddress(defaultRootAddr).ID
+		opts.rootAddress = defaultRootAddr.ID
 	}
-	return &CocoonClient{w: w, opts: opts}
+	return &CocoonClient{w: w, lc: lc, opts: opts}
 }
 
 // Connect dials the proxy, performs the handshake and authorization, and
 // returns a ready-to-use Connection.
 func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connection, error) {
-	lc, err := liteapi.NewClientWithDefaultMainnet()
-	if err != nil {
-		return nil, fmt.Errorf("create liteapi client: %w", err)
-	}
-
-	rootClient := abiCocoon.NewCocoonRoot(lc, lc).WithAccountId(c.opts.rootAddress)
+	rootClient := abiCocoon.NewCocoonRoot(c.lc, c.lc).WithAccountId(c.opts.rootAddress)
 	_, rootStore, err := rootClient.AccountState(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get root storage: %w", err)
@@ -125,71 +123,13 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 		return nil, fmt.Errorf("parse client SC address: %w", err)
 	}
 
-	clientContr := abiCocoon.NewCocoonClient(lc, lc).WithAccountId(clientScAddr)
-	accState, _, err := clientContr.AccountState(ctx)
+	clientSC := contract.New(clientScAddr, c.opts.secret, c.w, c.lc)
+	deployed, err := clientSC.Sync(ctx, rootStore.Params.Value.MinClientStake, logger)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("get client storage: %w", err)
+		return nil, fmt.Errorf("sync client contract: %w", err)
 	}
-	if accState.Account.SumType == "Account" {
-		clientData, err := clientContr.GetCocoonClientData(ctx)
-		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("get cocoon client data: %w", err)
-		}
-
-		if c.opts.secret == "" {
-			conn.Close()
-			return nil, fmt.Errorf("secret is required for long auth")
-		}
-		secretHash := sha256hash(c.opts.secret)
-		if diff, ok := clientData.SecretHash.Compare(secretHash); ok && diff != 0 {
-			secHashJson, _ := secretHash.MarshalJSON()
-			expectedHashJson, _ := clientData.SecretHash.MarshalJSON()
-			logger.Warn("secret hash mismatch",
-				zap.String("actual", string(secHashJson)),
-				zap.String("expected", string(expectedHashJson)),
-			)
-			msg, err := abiCocoon.OwnerClientChangeSecretHash{
-				QueryId:        tlb.Uint64(rand.Uint64()),
-				NewSecretHash:  secretHash,
-				SendExcessesTo: c.w.Address().ToInternal(),
-			}.ToInternal(clientScAddr.ToInternal(), toncents(20), false, nil)
-			if err != nil {
-				conn.Close()
-				return nil, fmt.Errorf("building change secret hash: %w", err)
-			}
-			if err := c.w.ForwardMessage(ctx, msg); err != nil {
-				return nil, fmt.Errorf("forward change secret request failed: %w", err)
-			}
-			logger.Info("change secret request sent")
-			time.Sleep(7 * time.Second)
-		}
-
-		if clientData.Balance <= rootStore.Params.Value.MinClientStake {
-			topUpAmount := rootStore.Params.Value.MinClientStake - accState.Account.Account.Storage.Balance.Grams + toncents(50)
-			logger.Info("amount is low, topping up",
-				zap.Uint64("amount", uint64(topUpAmount)),
-				zap.Uint64("balance", uint64(accState.Account.Account.Storage.Balance.Grams)),
-				zap.Uint64("client_state_balance", uint64(clientData.Balance)),
-				zap.Uint64("min_stake", uint64(rootStore.Params.Value.MinClientStake)),
-			)
-			msg, err := abiCocoon.ExtClientTopUp{
-				QueryId:        tlb.Uint64(rand.Uint64()),
-				TopUpAmount:    topUpAmount,
-				SendExcessesTo: c.w.Address().ToInternal(),
-			}.ToInternal(clientScAddr.ToInternal(), topUpAmount+toncents(20), false, nil)
-			if err != nil {
-				conn.Close()
-				return nil, fmt.Errorf("building top-up message failed: %w", err)
-			}
-			if err := c.w.ForwardMessage(ctx, msg); err != nil {
-				return nil, fmt.Errorf("forward top-up request failed: %w", err)
-			}
-			logger.Info("top-up request sent")
-			time.Sleep(7 * time.Second)
-		}
-	}
+	_ = deployed
 
 	auth := resp.Auth
 	switch auth.SumType {
@@ -211,9 +151,8 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 	case "ClientProxyConnectionAuthLong":
 		long := auth.ClientProxyConnectionAuthLong
 		logger.Info("auth type: long", zap.Uint64("nonce", long.Nonce))
-
 		proxyScAddr := ton.MustParseAccountID(resp.Params.ProxyScAddress)
-		if err := sendRegisterTx(ctx, c.w, clientScAddr, long.Nonce, logger, proxyScAddr,
+		if err := clientSC.Register(ctx, long.Nonce, logger, proxyScAddr,
 			resp.Params.ProxyPublicKey,
 			rootStore.Params.Value.MinClientStake,
 			rootStore.Params.Value,
@@ -248,73 +187,6 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 	}, nil
 }
 
-func sendRegisterTx(
-	ctx context.Context, w Wallet,
-	clientScAddr ton.AccountID, nonce uint64, logger *zap.Logger,
-	proxyAddr ton.AccountID, proxyPubKey tl.Int256, minclstake tlb.Coins,
-	cocoonParams *abiCocoon.CocoonParams) error {
-
-	if !cocoonParams.ClientScCode.Exists {
-		panic("client SC code must exist in cocoon params")
-	}
-
-	x := big.NewInt(0).SetBytes(proxyPubKey[:])
-	proxyPubKey1 := tlb.Uint256(*x)
-
-	zero := big.NewInt(0)
-	cocoonParamsCopy := *cocoonParams
-	cocoonParamsCopy.ClientScCode.Exists = false
-	cocoonParamsCopy.WorkerScCode.Exists = false
-	cocoonParamsCopy.ProxyScCode.Exists = false
-
-	clientInitState := tlb.StateInitT[*abiCocoon.ClientStorage]{
-		Code: tlb.JustRef(cocoonParams.ClientScCode.Value),
-		Data: tlb.JustRef(&abiCocoon.ClientStorage{
-			State:      0,
-			Balance:    0,
-			Stake:      minclstake,
-			TokensUsed: 0,
-			UnlockTs:   0,
-			SecretHash: tlb.Uint256(*zero),
-			ConstDataRef: tlb.RefT[*abiCocoon.ClientConstData]{
-				Value: &abiCocoon.ClientConstData{
-					OwnerAddress:   w.Address().ToInternal(),
-					ProxyAddress:   proxyAddr.ToInternal(),
-					ProxyPublicKey: tlb.Uint256(proxyPubKey1),
-				},
-			},
-			Params: tlb.RefT[*abiCocoon.CocoonParams]{Value: &cocoonParamsCopy},
-		}),
-	}
-
-	cliInStCell, _ := clientInitState.ToCell()
-	cliInStCellHash, _ := cliInStCell.HashString()
-	fmt.Println("cliInStCellHash", cliInStCellHash)
-
-	registerMsg, err := abiCocoon.OwnerClientRegister{
-		QueryId:        0,
-		Nonce:          tlb.Uint64(nonce),
-		SendExcessesTo: w.Address().ToInternal(),
-	}.ToInternal(
-		tlb.InternalAddress{
-			Workchain: int8(clientScAddr.Workchain),
-			Address:   tlb.Bits256(clientScAddr.Address),
-		},
-		tlb.Grams(50_000_000)+minclstake,
-		true,
-		&clientInitState,
-	)
-	if err != nil {
-		return fmt.Errorf("build OwnerClientRegister: %w", err)
-	}
-
-	if err := w.ForwardMessage(ctx, registerMsg); err != nil {
-		return fmt.Errorf("forward register message: %w", err)
-	}
-	logger.Info("register tx sent")
-	return nil
-}
-
 func checkAuth(r tlcocoonapi.ClientAuthorizationWithProxy, logger *zap.Logger) error {
 	switch r.SumType {
 	case "ClientAuthorizationWithProxySuccess":
@@ -341,14 +213,3 @@ func clientAddr(addr string) string {
 
 func boolPtr(v bool) *bool       { return &v }
 func uint32Ptr(v uint32) *uint32 { return &v }
-
-func sha256hash(data string) tlb.Uint256 {
-	secHash := sha256.New()
-	secHash.Write([]byte(data))
-	secHashBytes := big.NewInt(0).SetBytes(secHash.Sum(nil))
-	return tlb.Uint256(*secHashBytes)
-}
-
-func toncents(cents uint64) tlb.Coins {
-	return tlb.Coins(cents * 1_000_000_000 / 100)
-}

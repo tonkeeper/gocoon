@@ -66,6 +66,8 @@ github.com/tonkeeper/tongo v1.18.5-0.20260417074212-5ea81fc599df h1:9U6+Xud/IzCr
 github.com/tonkeeper/tongo v1.18.5-0.20260417074212-5ea81fc599df/go.mod h1:nHmdEXPfT0/EvkEaBzPiY599/0OYjQSW4dWR7aX+OII=
 github.com/tonkeeper/tongo v1.19.1-0.20260417131203-ac18e512b000 h1:aF/cpwqx/pzG1jRapa+slRLyo5oAZLJi219vAW8zpTk=
 github.com/tonkeeper/tongo v1.19.1-0.20260417131203-ac18e512b000/go.mod h1:nHmdEXPfT0/EvkEaBzPiY599/0OYjQSW4dWR7aX+OII=
+github.com/tonkeeper/tongo v1.19.1-0.20260417135212-97ef83ef6640 h1:U4npFMpt3aY4TZcM6v3+0OUxJvHMxo3j5WdAZydtaag=
+github.com/tonkeeper/tongo v1.19.1-0.20260417135212-97ef83ef6640/go.mod h1:nHmdEXPfT0/EvkEaBzPiY599/0OYjQSW4dWR7aX+OII=
 go.opentelemetry.io/otel v1.32.0 h1:WnBN+Xjcteh0zdk01SVqV55d/m62NJLJdIyb4y/WO5U=
 go.opentelemetry.io/otel v1.32.0/go.mod h1:00DCVSB0RQcnzlwyTfqtxSm+DRr9hpYrHjNGiBHVQIg=
 go.opentelemetry.io/otel/metric v1.32.0 h1:xV2umtmNcThh2/a/aCP+h64Xx5wsj8qqnkYZktzNa0M=

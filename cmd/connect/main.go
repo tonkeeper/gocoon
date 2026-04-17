@@ -30,18 +30,18 @@ func main() {
 		logger.Fatal("parse PRIVATE_KEY", zap.Error(err))
 	}
 
-	lc, err := liteapi.NewClientWithDefaultMainnet()
+	liteClient, err := liteapi.NewClientWithDefaultMainnet()
 	if err != nil {
 		logger.Fatal("create liteapi client", zap.Error(err))
 	}
 
-	w, err := cocoonWallet.New(priv, walletOwnerAddr, lc)
+	wallet, err := cocoonWallet.New(priv, walletOwnerAddr, liteClient)
 	if err != nil {
 		logger.Fatal("create wallet", zap.Error(err))
 	}
-	logger.Info("wallet address", zap.String("address", w.Address().ToHuman(false, false)))
+	logger.Info("wallet address", zap.String("address", wallet.Address().ToHuman(false, false)))
 
-	cc := goclient.NewCocoonClient(w, goclient.Opts{}.WithSecret(clientSecret))
+	cc := goclient.NewCocoonClient(wallet, liteClient, goclient.Opts{}.WithSecret(clientSecret))
 	conn, err := cc.Connect(ctx, logger)
 	if err != nil {
 		logger.Fatal("connect", zap.Error(err))
