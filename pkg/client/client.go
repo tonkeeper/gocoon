@@ -15,7 +15,8 @@ import (
 
 	"github.com/tonkeeper/gocoon/pkg/client/contract"
 	"github.com/tonkeeper/gocoon/pkg/cocoon"
-	"github.com/tonkeeper/gocoon/pkg/tlcocoonapi"
+	"github.com/tonkeeper/gocoon/pkg/tlcocoon"
+	tlcocoonTypes "github.com/tonkeeper/gocoon/pkg/tlcocoon/types"
 )
 
 var defaultRootAddr = tongo.MustParseAddress("EQCns7bYSp0igFvS1wpb5wsZjCKCV19MD5AVzI4EyxsnU73k")
@@ -91,18 +92,17 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 		return nil, fmt.Errorf("new session: %w", err)
 	}
 
-	apiClient := tlcocoonapi.NewClient(sess.Query)
+	apiClient := tlcocoon.NewClient(sess)
 	rootVersion := uint32(c.rootStore.Version)
 
-	resp, err := apiClient.ClientConnectToProxy(ctx, tlcocoonapi.ClientConnectToProxyRequest{
-		Params: tlcocoonapi.ClientParamsC{
-			Flags:              3,
+	resp, err := apiClient.ConnectToProxy(ctx, tlcocoon.ClientConnectToProxyRequest{
+		Params: tlcocoonTypes.ClientParams{
 			ClientOwnerAddress: c.wallet.Address().ToHuman(false, false),
 			IsTest:             boolPtr(false),
-			MinProtoVersion:    uint32Ptr(1),
-			MaxProtoVersion:    uint32Ptr(1),
+			MinProtoVersion:    int32Ptr(1),
+			MaxProtoVersion:    int32Ptr(1),
 		},
-		MinConfigVersion: rootVersion,
+		MinConfigVersion: int32(rootVersion),
 	})
 	if err != nil {
 		conn.Close()
@@ -130,14 +130,13 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 	}
 	_ = deployed
 
-	auth := resp.Auth
-	switch auth.SumType {
-	case "ClientProxyConnectionAuthShort":
-		short := auth.ClientProxyConnectionAuthShort
+	switch auth := resp.Auth.(type) {
+	case *tlcocoonTypes.ClientProxyConnectionAuthShort:
 		logger.Info("auth type: short",
-			zap.String("secret_hash", hex.EncodeToString(short.SecretHash[:])))
-		authResp, err := apiClient.ClientAuthorizeWithProxyShort(ctx,
-			tlcocoonapi.ClientAuthorizeWithProxyShortRequest{Data: []byte(c.secret)})
+			zap.String("secret_hash", hex.EncodeToString(auth.SecretHash[:])))
+		authResp, err := apiClient.AuthorizeWithProxyShort(ctx, tlcocoon.ClientAuthorizeWithProxyShortRequest{
+			Data: []byte(c.secret),
+		})
 		if err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("authorizeWithProxyShort: %w", err)
@@ -147,11 +146,10 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 			return nil, err
 		}
 
-	case "ClientProxyConnectionAuthLong":
-		long := auth.ClientProxyConnectionAuthLong
-		logger.Info("auth type: long", zap.Uint64("nonce", long.Nonce))
+	case *tlcocoonTypes.ClientProxyConnectionAuthLong:
+		logger.Info("auth type: long", zap.Uint64("nonce", uint64(auth.Nonce)))
 		proxyScAddr := ton.MustParseAccountID(resp.Params.ProxyScAddress)
-		if err := clientSC.Register(ctx, long.Nonce, logger, proxyScAddr,
+		if err := clientSC.Register(ctx, uint64(auth.Nonce), logger, proxyScAddr,
 			resp.Params.ProxyPublicKey,
 			c.rootStore.Params.Value.MinClientStake,
 			c.rootStore.Params.Value,
@@ -162,7 +160,7 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 		logger.Info("waiting for on-chain confirmation (up to 300s)")
 		longCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
 		defer cancel()
-		authResp, err := apiClient.ClientAuthorizeWithProxyLong(longCtx)
+		authResp, err := apiClient.AuthorizeWithProxyLong(longCtx, tlcocoon.ClientAuthorizeWithProxyLongRequest{})
 		if err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("authorizeWithProxyLong: %w", err)
@@ -174,12 +172,12 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 
 	default:
 		conn.Close()
-		return nil, fmt.Errorf("unknown auth type: %s", auth.SumType)
+		return nil, fmt.Errorf("unknown auth type: %T", auth)
 	}
 
 	var protoVersion uint32
 	if resp.Params.ProtoVersion != nil {
-		protoVersion = *resp.Params.ProtoVersion
+		protoVersion = uint32(*resp.Params.ProtoVersion)
 	}
 
 	return &Connection{
@@ -192,19 +190,17 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 	}, nil
 }
 
-func checkAuth(r tlcocoonapi.ClientAuthorizationWithProxy, logger *zap.Logger) error {
-	switch r.SumType {
-	case "ClientAuthorizationWithProxySuccess":
-		s := r.ClientAuthorizationWithProxySuccess
+func checkAuth(r tlcocoonTypes.IClientAuthorizationWithProxy, logger *zap.Logger) error {
+	switch s := r.(type) {
+	case *tlcocoonTypes.ClientAuthorizationWithProxySuccess:
 		logger.Info("auth success",
-			zap.Uint64("tokens_committed", s.TokensCommittedToDb),
-			zap.Uint64("max_tokens", s.MaxTokens))
+			zap.Uint64("tokens_committed", uint64(s.TokensCommittedToDb)),
+			zap.Uint64("max_tokens", uint64(s.MaxTokens)))
 		return nil
-	case "ClientAuthorizationWithProxyFailed":
-		f := r.ClientAuthorizationWithProxyFailed
-		return fmt.Errorf("authorization failed (code %d): %s", f.ErrorCode, f.Error)
+	case *tlcocoonTypes.ClientAuthorizationWithProxyFailed:
+		return fmt.Errorf("authorization failed (code %d): %s", s.ErrorCode, s.Error)
 	default:
-		return fmt.Errorf("unknown auth result: %s", r.SumType)
+		return fmt.Errorf("unknown auth result: %T", r)
 	}
 }
 
@@ -216,5 +212,5 @@ func clientAddr(addr string) string {
 	return parts[0]
 }
 
-func boolPtr(v bool) *bool       { return &v }
-func uint32Ptr(v uint32) *uint32 { return &v }
+func boolPtr(v bool) *bool    { return &v }
+func int32Ptr(v int32) *int32 { return &v }

@@ -1,17 +1,14 @@
 package client
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"fmt"
 
-	"github.com/tonkeeper/tongo/tl"
 	"go.uber.org/zap"
 
 	"github.com/tonkeeper/gocoon/pkg/cocoon"
-	"github.com/tonkeeper/gocoon/pkg/tlcocoonapi"
+	"github.com/tonkeeper/gocoon/pkg/tlcocoon"
+	tlcocoonTypes "github.com/tonkeeper/gocoon/pkg/tlcocoon/types"
 )
 
 const (
@@ -37,42 +34,55 @@ type WorkerType struct {
 type Connection struct {
 	conn         *cocoon.Conn
 	sess         *cocoon.Session
-	apiClient    *tlcocoonapi.Client
+	apiClient    *tlcocoon.Client
 	rootVersion  uint32
 	protoVersion uint32
 	logger       *zap.Logger
 }
 
-// Close tears down the underlying TLS connection.
+// Close tears down the session and the underlying TLS connection.
 func (c *Connection) Close() error {
+	_ = c.sess.Close()
 	return c.conn.Close()
 }
 
-// POST sends an HTTP POST request through the cocoon proxy and returns the
-// response body bytes. Content-Type: application/json is set automatically.
+// POST sends an HTTP POST request through the cocoon proxy and returns the response body bytes.
 func (c *Connection) POST(ctx context.Context, model, path string, body []byte) ([]byte, error) {
-	query, err := buildHTTPRequest("POST", path, [][2]string{{"Content-Type", "application/json"}}, body)
+	query, err := tlcocoon.EncodeHTTPRequest(
+		"POST",
+		path,
+		"HTTP/1.1",
+		[]tlcocoonTypes.HttpHeader{{Name: "Content-Type", Value: "application/json"}},
+		body,
+	)
 	if err != nil {
 		return nil, err
 	}
-	return c.runQuery(ctx, model, query)
+	raw, err := c.runQuery(ctx, model, query)
+	if err != nil {
+		return nil, err
+	}
+	return tlcocoon.DecodeHTTPResponsePayload(raw)
 }
 
-// GET sends an HTTP GET request through the cocoon proxy and returns the
-// response body bytes.
+// GET sends an HTTP GET request through the cocoon proxy and returns the response body bytes.
 func (c *Connection) GET(ctx context.Context, model, path string) ([]byte, error) {
-	query, err := buildHTTPRequest("GET", path, nil, nil)
+	query, err := tlcocoon.EncodeHTTPRequest("GET", path, "HTTP/1.1", nil, nil)
 	if err != nil {
 		return nil, err
 	}
-	return c.runQuery(ctx, model, query)
+	raw, err := c.runQuery(ctx, model, query)
+	if err != nil {
+		return nil, err
+	}
+	return tlcocoon.DecodeHTTPResponsePayload(raw)
 }
 
 // GetWorkerTypes returns the list of worker types available on the proxy,
-// normalised to a unified type regardless of the negotiated proto version.
+// normalized to a unified type regardless of the negotiated proto version.
 func (c *Connection) GetWorkerTypes(ctx context.Context) ([]WorkerType, error) {
 	if c.protoVersion != 0 {
-		res, err := c.apiClient.ClientGetWorkerTypesV2(ctx)
+		res, err := c.apiClient.GetWorkerTypesV2(ctx, tlcocoon.ClientGetWorkerTypesV2Request{})
 		if err != nil {
 			return nil, fmt.Errorf("getWorkerTypesV2: %w", err)
 		}
@@ -81,9 +91,9 @@ func (c *Connection) GetWorkerTypes(ctx context.Context) ([]WorkerType, error) {
 			workers := make([]WorkerInstance, len(wt.Workers))
 			for j, w := range wt.Workers {
 				workers[j] = WorkerInstance{
-					Coefficient:       w.Coefficient,
-					ActiveRequests:    w.ActiveRequests,
-					MaxActiveRequests: w.MaxActiveRequests,
+					Coefficient:       uint32(w.Coefficient),
+					ActiveRequests:    uint32(w.ActiveRequests),
+					MaxActiveRequests: uint32(w.MaxActiveRequests),
 				}
 			}
 			out[i] = WorkerType{Name: wt.Name, Workers: workers}
@@ -91,7 +101,7 @@ func (c *Connection) GetWorkerTypes(ctx context.Context) ([]WorkerType, error) {
 		return out, nil
 	}
 
-	res, err := c.apiClient.ClientGetWorkerTypes(ctx)
+	res, err := c.apiClient.GetWorkerTypes(ctx, tlcocoon.ClientGetWorkerTypesRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("getWorkerTypes: %w", err)
 	}
@@ -100,8 +110,8 @@ func (c *Connection) GetWorkerTypes(ctx context.Context) ([]WorkerType, error) {
 		out[i] = WorkerType{
 			Name: wt.Name,
 			Workers: []WorkerInstance{{
-				Coefficient:       wt.CoefficientBucket50,
-				ActiveRequests:    wt.ActiveWorkers,
+				Coefficient:       uint32(wt.CoefficientBucket50),
+				ActiveRequests:    uint32(wt.ActiveWorkers),
 				MaxActiveRequests: 0,
 			}},
 		}
@@ -112,103 +122,14 @@ func (c *Connection) GetWorkerTypes(ctx context.Context) ([]WorkerType, error) {
 // runQuery marshals a RunQueryEx message, sends it, collects streamed answer
 // packets, and returns the assembled response body.
 func (c *Connection) runQuery(ctx context.Context, model string, queryBytes []byte) ([]byte, error) {
-	var reqID tl.Int256
-	if _, err := rand.Read(reqID[:]); err != nil {
-		return nil, fmt.Errorf("generate request id: %w", err)
-	}
-
-	payload, err := tl.Marshal(struct {
-		tl.SumType
-		Req tlcocoonapi.ClientRunQueryExRequest `tlSumType:"f54cb74b"`
-	}{SumType: "Req", Req: tlcocoonapi.ClientRunQueryExRequest{
-		ModelName:        model,
-		Query:            queryBytes,
-		MaxCoefficient:   defaultMaxCoefficient,
-		MaxTokens:        defaultMaxTokens,
+	raw, err := c.sess.RunClientQueryEx(ctx, model, queryBytes, cocoon.RunQueryExOptions{
+		MaxCoefficient:   int32(defaultMaxCoefficient),
+		MaxTokens:        int32(defaultMaxTokens),
 		Timeout:          defaultTimeout,
-		RequestId:        reqID,
-		MinConfigVersion: c.rootVersion,
-		Flags:            0,
-	}})
+		MinConfigVersion: int32(c.rootVersion),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("marshal runQueryEx: %w", err)
+		return nil, fmt.Errorf("runQueryEx: %w", err)
 	}
-	if err := c.sess.SendMessage(payload); err != nil {
-		return nil, fmt.Errorf("send runQueryEx: %w", err)
-	}
-
-	var buf []byte
-	for {
-		pkt, err := c.sess.RecvPacket()
-		if err != nil {
-			return nil, fmt.Errorf("recv packet: %w", err)
-		}
-		var ans tlcocoonapi.ClientQueryAnswerEx
-		if err := tl.Unmarshal(bytes.NewReader(pkt), &ans); err != nil {
-			c.logger.Warn("unrecognised packet", zap.Int("len", len(pkt)), zap.Error(err))
-			continue
-		}
-		switch ans.SumType {
-		case "ClientQueryAnswerEx":
-			a := ans.ClientQueryAnswerEx
-			if a.RequestId != reqID {
-				continue
-			}
-			buf = append(buf, a.Answer...)
-			if a.Flags&1 == 1 {
-				return buf, nil
-			}
-		case "ClientQueryAnswerPartEx":
-			a := ans.ClientQueryAnswerPartEx
-			if a.RequestId != reqID {
-				continue
-			}
-			buf = append(buf, a.Answer...)
-			if a.Flags&1 == 1 {
-				return buf, nil
-			}
-		case "ClientQueryAnswerErrorEx":
-			a := ans.ClientQueryAnswerErrorEx
-			if a.RequestId != reqID {
-				continue
-			}
-			return nil, fmt.Errorf("query error (code %d): %s", a.ErrorCode, a.Error)
-		}
-	}
-}
-
-// buildHTTPRequest serializes a boxed TL http.request.
-// Layout: [tag u32][method][url][http_version][vector<http.header>][payload]
-func buildHTTPRequest(method, path string, headers [][2]string, body []byte) ([]byte, error) {
-	buf := new(bytes.Buffer)
-
-	// boxed http.request tag = 0x47492DE5
-	binary.Write(buf, binary.LittleEndian, uint32(0x47492DE5))
-
-	for _, s := range []string{method, path, "HTTP/1.1"} {
-		b, err := tl.Marshal(s)
-		if err != nil {
-			return nil, err
-		}
-		buf.Write(b)
-	}
-
-	binary.Write(buf, binary.LittleEndian, uint32(len(headers)))
-	for _, h := range headers {
-		for _, s := range h {
-			b, err := tl.Marshal(s)
-			if err != nil {
-				return nil, err
-			}
-			buf.Write(b)
-		}
-	}
-
-	b, err := tl.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	buf.Write(b)
-
-	return buf.Bytes(), nil
+	return raw, nil
 }

@@ -14,23 +14,11 @@
 // int128 4*[ int ] = Int128;
 // int256 8*[ int ] = Int256;
 
-tokensUsed prompt_tokens_used:long cached_tokens_used:long completion_tokens_used:long reasoning_tokens_used:long
-           total_tokens_used:long = TokensUsed;
+tokensUsed prompt_tokens_used:long cached_tokens_used:long completion_tokens_used:long reasoning_tokens_used:long total_tokens_used:long = TokensUsed;
 
-proxy.params#d5c5609f flags:#
-  proxy_public_key:int256
-  proxy_owner_address:string
-  proxy_sc_address:string
-  is_test:flags.0?Bool
-  proto_version:flags.1?int
-  = proxy.Params;
+proxy.params#d5c5609f flags:# proxy_public_key:int256 proxy_owner_address:string proxy_sc_address:string is_test:flags.0?Bool proto_version:flags.1?int = proxy.Params;
 
-client.params#40fdca64 flags:#
-  client_owner_address:string
-  is_test:flags.0?Bool
-  min_proto_version:flags.1?int
-  max_proto_version:flags.1?int
-  = client.Params;
+client.params#40fdca64 flags:# client_owner_address:string is_test:flags.0?Bool min_proto_version:flags.1?int max_proto_version:flags.1?int = client.Params;
 
 proxy.signedPayment data:bytes = proxy.SignedPayment;
 proxy.signedPaymentEmpty = proxy.SignedPayment;
