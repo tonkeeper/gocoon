@@ -103,7 +103,7 @@ func generateEphemeralCert() (tls.Certificate, error) {
 
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "cocoon-client"},
+		Subject:      pkix.Name{CommonName: "tonkeeper/gocoon"},
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,

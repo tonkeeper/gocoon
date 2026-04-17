@@ -131,11 +131,9 @@ func (c *ClientContract) syncSecretHash(ctx context.Context, data abiCocoon.Coco
 	if !ok || diff == 0 {
 		return nil
 	}
-	secHashJSON, _ := secretHash.MarshalJSON()
-	expectedJSON, _ := data.SecretHash.MarshalJSON()
 	logger.Warn("secret hash mismatch",
-		zap.String("actual", string(secHashJSON)),
-		zap.String("expected", string(expectedJSON)),
+		zap.String("actual", secretHash.HexString()),
+		zap.String("expected", data.SecretHash.HexString()),
 	)
 	msg, err := abiCocoon.OwnerClientChangeSecretHash{
 		QueryId:        tlb.Uint64(rand.Uint64()),

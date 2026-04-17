@@ -20,13 +20,27 @@ const (
 	defaultTimeout        = 30.0
 )
 
+// WorkerInstance describes a single inference worker.
+type WorkerInstance struct {
+	Coefficient       uint32
+	ActiveRequests    uint32
+	MaxActiveRequests uint32
+}
+
+// WorkerType describes a model type and its available workers.
+type WorkerType struct {
+	Name    string
+	Workers []WorkerInstance
+}
+
 // Connection is a live, authorized connection to a cocoon proxy.
 type Connection struct {
-	conn        *cocoon.Conn
-	sess        *cocoon.Session
-	apiClient   *tlcocoonapi.Client
-	rootVersion uint32
-	logger      *zap.Logger
+	conn         *cocoon.Conn
+	sess         *cocoon.Session
+	apiClient    *tlcocoonapi.Client
+	rootVersion  uint32
+	protoVersion uint32
+	logger       *zap.Logger
 }
 
 // Close tears down the underlying TLS connection.
@@ -52,6 +66,47 @@ func (c *Connection) GET(ctx context.Context, model, path string) ([]byte, error
 		return nil, err
 	}
 	return c.runQuery(ctx, model, query)
+}
+
+// GetWorkerTypes returns the list of worker types available on the proxy,
+// normalised to a unified type regardless of the negotiated proto version.
+func (c *Connection) GetWorkerTypes(ctx context.Context) ([]WorkerType, error) {
+	if c.protoVersion != 0 {
+		res, err := c.apiClient.ClientGetWorkerTypesV2(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("getWorkerTypesV2: %w", err)
+		}
+		out := make([]WorkerType, len(res.Types))
+		for i, wt := range res.Types {
+			workers := make([]WorkerInstance, len(wt.Workers))
+			for j, w := range wt.Workers {
+				workers[j] = WorkerInstance{
+					Coefficient:       w.Coefficient,
+					ActiveRequests:    w.ActiveRequests,
+					MaxActiveRequests: w.MaxActiveRequests,
+				}
+			}
+			out[i] = WorkerType{Name: wt.Name, Workers: workers}
+		}
+		return out, nil
+	}
+
+	res, err := c.apiClient.ClientGetWorkerTypes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getWorkerTypes: %w", err)
+	}
+	out := make([]WorkerType, len(res.Types))
+	for i, wt := range res.Types {
+		out[i] = WorkerType{
+			Name: wt.Name,
+			Workers: []WorkerInstance{{
+				Coefficient:       wt.CoefficientBucket50,
+				ActiveRequests:    wt.ActiveWorkers,
+				MaxActiveRequests: 0,
+			}},
+		}
+	}
+	return out, nil
 }
 
 // runQuery marshals a RunQueryEx message, sends it, collects streamed answer
