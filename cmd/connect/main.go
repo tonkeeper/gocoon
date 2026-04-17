@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -9,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/tonkeeper/tongo/liteapi"
@@ -19,16 +21,20 @@ import (
 	cocoonWallet "github.com/tonkeeper/gocoon/pkg/wallet"
 )
 
+const (
+	chatModel    = "Qwen/Qwen3-32B"
+	maxTokens    = 1200
+	systemPrompt = "Disable thinking"
+)
+
 func main() {
 	logger := zap.Must(zap.NewDevelopment())
 	defer logger.Sync() //nolint:errcheck
-	var err error
 	ctx := context.Background()
 
 	walletOwnerAddr := ton.MustParseAccountID(os.Getenv("OWNER_ADDRESS"))
 	clientSecret := os.Getenv("CLIENT_SECRET")
-	var priv ed25519.PrivateKey
-	priv, err = privKeyFromHex(os.Getenv("PRIVATE_KEY"))
+	priv, err := privKeyFromHex(os.Getenv("PRIVATE_KEY"))
 	if err != nil {
 		logger.Fatal("parse PRIVATE_KEY", zap.Error(err))
 	}
@@ -59,7 +65,7 @@ func main() {
 	if err != nil {
 		logger.Fatal("GetWorkerTypes", zap.Error(err))
 	}
-	logger.Info("worker types", zap.Duration("elapsed", time.Since(t0)))
+	logger.Info("worker types fetched", zap.Duration("elapsed", time.Since(t0)))
 	for _, wt := range workerTypes {
 		fmt.Printf("  %s (%d workers)\n", wt.Name, len(wt.Workers))
 		for _, w := range wt.Workers {
@@ -67,47 +73,70 @@ func main() {
 		}
 	}
 
-	const testModel = "Qwen/Qwen3-32B"
-	bodyJSON, err := json.Marshal(map[string]any{
-		"model":      testModel,
-		"messages":   []map[string]string{{"role": "user", "content": "Tell me latest news about TON"}},
-		"max_tokens": 1200,
-	})
-	if err != nil {
-		logger.Fatal("marshal query body", zap.Error(err))
+	type message struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	history := []message{
+		{Role: "system", Content: systemPrompt},
 	}
 
-	logger.Info("running query", zap.String("model", testModel))
-	t0 = time.Now()
-	resp, err := conn.POST(ctx, testModel, "/v1/chat/completions", bodyJSON)
-	if err != nil {
-		logger.Fatal("POST", zap.Error(err))
-	}
-	logger.Info("inference done", zap.Duration("elapsed", time.Since(t0)))
+	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Printf("\nChat with %s (Ctrl+D to quit)\n\n", chatModel)
+	for {
+		fmt.Print("You: ")
+		if !scanner.Scan() {
+			break
+		}
+		userText := strings.TrimSpace(scanner.Text())
+		if userText == "" {
+			continue
+		}
+		history = append(history, message{Role: "user", Content: userText})
 
-	idx := bytes.Index(resp, []byte("{"))
-	if idx < 0 {
-		logger.Fatal("JSON not found in response", zap.ByteString("resp", resp))
-	}
-	var completion struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(resp[idx:], &completion); err != nil {
-		logger.Fatal("parse completion JSON", zap.Error(err))
-	}
-	if len(completion.Choices) > 0 {
-		fmt.Println(completion.Choices[0].Message.Content)
+		bodyJSON, err := json.Marshal(map[string]any{
+			"model":      chatModel,
+			"messages":   history,
+			"max_tokens": maxTokens,
+		})
+		if err != nil {
+			logger.Fatal("marshal request", zap.Error(err))
+		}
+
+		t0 := time.Now()
+		resp, err := conn.POST(ctx, chatModel, "/v1/chat/completions", bodyJSON)
+		if err != nil {
+			logger.Fatal("POST", zap.Error(err))
+		}
+		elapsed := time.Since(t0)
+
+		idx := bytes.Index(resp, []byte("{"))
+		if idx < 0 {
+			logger.Fatal("JSON not found in response", zap.ByteString("resp", resp))
+		}
+		var completion struct {
+			Choices []struct {
+				Message message `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(resp[idx:], &completion); err != nil {
+			logger.Fatal("parse completion JSON", zap.Error(err))
+		}
+		if len(completion.Choices) == 0 {
+			logger.Warn("empty choices in response")
+			continue
+		}
+
+		reply := completion.Choices[0].Message
+		history = append(history, reply)
+		fmt.Printf("\nAssistant (%s): %s\n\n", elapsed.Round(time.Millisecond), reply.Content)
 	}
 }
 
 func privKeyFromHex(seed string) (ed25519.PrivateKey, error) {
 	raw, err := hex.DecodeString(seed)
 	if err != nil || len(raw) != ed25519.SeedSize {
-		base64.StdEncoding.DecodeString(seed)
+		base64.StdEncoding.DecodeString(seed) //nolint:errcheck
 		return nil, fmt.Errorf("must be a 64-char hex string (32-byte Ed25519 seed): %v", err)
 	}
 	return ed25519.NewKeyFromSeed(raw), nil
