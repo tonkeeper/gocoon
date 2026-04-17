@@ -2,8 +2,11 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math/big"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -11,12 +14,13 @@ import (
 	tongo "github.com/tonkeeper/tongo"
 	abiCocoon "github.com/tonkeeper/tongo/abi-tolk/abiGenerated/cocoon"
 	"github.com/tonkeeper/tongo/liteapi"
+	"github.com/tonkeeper/tongo/tlb"
 	"github.com/tonkeeper/tongo/ton"
 	"go.uber.org/zap"
 
-	"github.com/tonkeeper/gococoon/pkg/cocoon"
-	"github.com/tonkeeper/gococoon/pkg/tlcocoonapi"
-	"github.com/tonkeeper/gococoon/pkg/wallet"
+	"github.com/tonkeeper/gocoon/pkg/cocoon"
+	"github.com/tonkeeper/gocoon/pkg/tlcocoonapi"
+	"github.com/tonkeeper/gocoon/pkg/wallet"
 )
 
 const defaultRootAddr = "EQCns7bYSp0igFvS1wpb5wsZjCKCV19MD5AVzI4EyxsnU73k"
@@ -71,7 +75,7 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 
 	// Read registered proxies from the root contract.
 	rootClient := abiCocoon.NewCocoonRoot(lc, lc).WithAccountId(c.opts.rootAddress)
-	rootStore, err := rootClient.GetStorage(ctx)
+	_, rootStore, err := rootClient.AccountState(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get root storage: %w", err)
 	}
@@ -100,7 +104,7 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 	resp, err := apiClient.ClientConnectToProxy(ctx, tlcocoonapi.ClientConnectToProxyRequest{
 		Params: tlcocoonapi.ClientParamsC{
 			Flags:              3, // bit0=is_test, bit1=proto versions
-			ClientOwnerAddress: c.w.OwnerAddress.ToHuman(false, false),
+			ClientOwnerAddress: c.w.Address.ToHuman(false, false),
 			IsTest:             boolPtr(false),
 			MinProtoVersion:    uint32Ptr(1),
 			MaxProtoVersion:    uint32Ptr(1),
@@ -118,6 +122,78 @@ func (c *CocoonClient) Connect(ctx context.Context, logger *zap.Logger) (*Connec
 		zap.String("proxy_sc", resp.Params.ProxyScAddress),
 		zap.String("client_sc", resp.ClientScAddress),
 		zap.String("proxy_pubkey", hex.EncodeToString(pubkey[:])))
+
+	clientScAddr, err := ton.ParseAccountID(resp.ClientScAddress)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("parse client SC address: %w", err)
+	}
+
+	clientContr := abiCocoon.NewCocoonClient(lc, lc).WithAccountId(clientScAddr)
+	accState, _, err := clientContr.AccountState(ctx)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("get client storage: %w", err)
+	}
+	if accState.Account.SumType == "Account" {
+		clientData, err := clientContr.GetCocoonClientData(ctx)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("get cocoon client data: %w", err)
+		}
+
+		if c.opts.secret == "" {
+			conn.Close()
+			return nil, fmt.Errorf("secret is required for long auth")
+		}
+		secretHash := sha256hash(c.opts.secret)
+		if diff, ok := clientData.SecretHash.Compare(secretHash); ok && diff != 0 {
+			secHashJson, _ := secretHash.MarshalJSON()
+			expectedHashJson, _ := clientData.SecretHash.MarshalJSON()
+			logger.Warn("secret hash mismatch",
+				zap.String("actual", string(secHashJson)),
+				zap.String("expected", string(expectedHashJson)),
+			)
+			msg, err := abiCocoon.OwnerClientChangeSecretHash{
+				QueryId:        tlb.Uint64(rand.Uint64()),
+				NewSecretHash:  secretHash,
+				SendExcessesTo: c.w.Address.ToInternal(),
+			}.ToInternal(clientScAddr.ToInternal(), toncents(20), false, nil)
+			if err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("building change secret hash: %w", err)
+			}
+			if err := c.w.ForwardMessage(ctx, lc, msg, c.sender); err != nil {
+				return nil, fmt.Errorf("forward change secret request failed: %w", err)
+			}
+			logger.Info("change secret request sent")
+			time.Sleep(7 * time.Second)
+		}
+
+		if clientData.Balance <= rootStore.Params.Value.MinClientStake {
+			topUpAmount := rootStore.Params.Value.MinClientStake - accState.Account.Account.Storage.Balance.Grams + toncents(50)
+			logger.Info("amount is low, topping up",
+				zap.Uint64("amount", uint64(topUpAmount)),
+				zap.Uint64("balance", uint64(accState.Account.Account.Storage.Balance.Grams)),
+				zap.Uint64("client_state_balance", uint64(clientData.Balance)),
+				zap.Uint64("min_stake", uint64(rootStore.Params.Value.MinClientStake)),
+			)
+			msg, err := abiCocoon.ExtClientTopUp{
+				QueryId:        tlb.Uint64(rand.Uint64()),
+				TopUpAmount:    topUpAmount,
+				SendExcessesTo: c.w.Address.ToInternal(),
+			}.ToInternal(clientScAddr.ToInternal(), topUpAmount+toncents(20), false, nil)
+			if err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("building top-up message failed: %w", err)
+			}
+			if err := c.w.ForwardMessage(ctx, lc, msg, c.sender); err != nil {
+				return nil, fmt.Errorf("forward top-up request failed: %w", err)
+			}
+			logger.Info("top-up request sent")
+			time.Sleep(7 * time.Second)
+		}
+	}
 
 	// Authorization.
 	auth := resp.Auth
@@ -212,3 +288,14 @@ func clientAddr(addr string) string {
 
 func boolPtr(v bool) *bool       { return &v }
 func uint32Ptr(v uint32) *uint32 { return &v }
+
+func sha256hash(data string) tlb.Uint256 {
+	secHash := sha256.New()
+	secHash.Write([]byte(data))
+	secHashBytes := big.NewInt(0).SetBytes(secHash.Sum(nil))
+	return tlb.Uint256(*secHashBytes)
+}
+
+func toncents(cents uint64) tlb.Coins {
+	return tlb.Coins(cents * 1_000_000_000 / 100)
+}

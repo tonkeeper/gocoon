@@ -10,8 +10,8 @@ import (
 	"github.com/tonkeeper/tongo/tl"
 	"go.uber.org/zap"
 
-	"github.com/tonkeeper/gococoon/pkg/cocoon"
-	"github.com/tonkeeper/gococoon/pkg/tlcocoonapi"
+	"github.com/tonkeeper/gocoon/pkg/cocoon"
+	"github.com/tonkeeper/gocoon/pkg/tlcocoonapi"
 )
 
 const (

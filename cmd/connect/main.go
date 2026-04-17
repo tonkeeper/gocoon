@@ -15,8 +15,8 @@ import (
 	"github.com/tonkeeper/tongo/ton"
 	"go.uber.org/zap"
 
-	goclient "github.com/tonkeeper/gococoon/pkg/client"
-	"github.com/tonkeeper/gococoon/pkg/wallet"
+	goclient "github.com/tonkeeper/gocoon/pkg/client"
+	"github.com/tonkeeper/gocoon/pkg/wallet"
 )
 
 func main() {
