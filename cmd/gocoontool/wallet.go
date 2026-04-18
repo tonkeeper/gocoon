@@ -15,12 +15,20 @@ import (
 )
 
 func cmdWalletGenerate() {
+	ownerAddr := ton.MustParseAccountID(os.Getenv("COCOON_WALLET_OWNER"))
+
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Fprintf(os.Stderr, "generated new key — set COCOON_WALLET_PRIVKEY=%s to reuse it\n",
-		hex.EncodeToString(priv.Seed()))
+
+	w, err := wallet_contract.New(priv, ownerAddr, nil)
+	if err != nil {
+		fatalf("create wallet: %v", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "COCOON_WALLET_PRIVKEY=%s\n", hex.EncodeToString(priv.Seed()))
+	fmt.Printf("Cocoon wallet address is %s\n", w.Address().ToHuman(false, false))
 }
 
 func cmdWalletDeploy() {
