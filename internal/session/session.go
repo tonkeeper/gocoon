@@ -81,7 +81,6 @@ type RunQueryExOptions struct {
 type packetPendingState struct {
 	resCh chan queryResult
 	buf   []byte
-	timer *time.Timer
 }
 
 // New creates a session and performs the initial tcp.connect/tcp.connected handshake.
@@ -390,7 +389,7 @@ func (s *Session) dropPending(queryID int64) {
 
 func (s *Session) resolvePacketPending(requestID [32]byte, res queryResult) {
 	s.packetPendingMu.Lock()
-	state, ok := s.packetPending[requestID]
+	st, ok := s.packetPending[requestID]
 	if ok {
 		delete(s.packetPending, requestID)
 	}
@@ -399,35 +398,15 @@ func (s *Session) resolvePacketPending(requestID [32]byte, res queryResult) {
 		return
 	}
 	select {
-	case state.resCh <- res:
+	case st.resCh <- res:
 	default:
 	}
 }
 
 func (s *Session) dropPacketPending(requestID [32]byte) {
 	s.packetPendingMu.Lock()
-	if st, ok := s.packetPending[requestID]; ok && st.timer != nil {
-		st.timer.Stop()
-	}
 	delete(s.packetPending, requestID)
 	s.packetPendingMu.Unlock()
-}
-
-func (s *Session) finalizePacketPending(requestID [32]byte) {
-	s.packetPendingMu.Lock()
-	state, ok := s.packetPending[requestID]
-	if ok {
-		delete(s.packetPending, requestID)
-	}
-	s.packetPendingMu.Unlock()
-	if !ok {
-		return
-	}
-	out := append([]byte(nil), state.buf...)
-	select {
-	case state.resCh <- queryResult{data: out}:
-	default:
-	}
 }
 
 func (s *Session) handleClientQueryPacket(data []byte) bool {
@@ -438,39 +417,44 @@ func (s *Session) handleClientQueryPacket(data []byte) bool {
 
 	switch a := ans.(type) {
 	case *tlcocoonTypes.ClientQueryAnswerPartEx:
-		s.packetPendingMu.Lock()
-		state, ok := s.packetPending[a.RequestID]
-		if ok {
-			state.buf = append(state.buf, a.Answer...)
-		}
-		s.packetPendingMu.Unlock()
-		return ok
+		s.appendPacketAnswer(a.RequestID, a.Answer, a.FinalInfo != nil)
+		return true
 	case *tlcocoonTypes.ClientQueryAnswerEx:
-		s.packetPendingMu.Lock()
-		state, ok := s.packetPending[a.RequestID]
-		if ok {
-			state.buf = append(state.buf, a.Answer...)
-			if state.timer != nil {
-				state.timer.Stop()
-			}
-			state.timer = time.AfterFunc(300*time.Millisecond, func() {
-				s.finalizePacketPending(a.RequestID)
-			})
-		}
-		s.packetPendingMu.Unlock()
-		return ok
+		s.appendPacketAnswer(a.RequestID, a.Answer, a.FinalInfo != nil)
+		return true
 	case *tlcocoonTypes.ClientQueryAnswerErrorEx:
-		s.packetPendingMu.Lock()
-		if state, ok := s.packetPending[a.RequestID]; ok && state.timer != nil {
-			state.timer.Stop()
-		}
-		s.packetPendingMu.Unlock()
 		s.resolvePacketPending(a.RequestID, queryResult{
 			err: fmt.Errorf("query error (code %d): %s", a.ErrorCode, a.Error),
 		})
 		return true
 	default:
 		return false
+	}
+}
+
+func (s *Session) appendPacketAnswer(requestID [32]byte, chunk []byte, isFinal bool) {
+	var (
+		state *packetPendingState
+		out   []byte
+	)
+
+	s.packetPendingMu.Lock()
+	state = s.packetPending[requestID]
+	if state != nil {
+		state.buf = append(state.buf, chunk...)
+		if isFinal {
+			delete(s.packetPending, requestID)
+			out = append([]byte(nil), state.buf...)
+		}
+	}
+	s.packetPendingMu.Unlock()
+
+	if state == nil || !isFinal {
+		return
+	}
+	select {
+	case state.resCh <- queryResult{data: out}:
+	default:
 	}
 }
 
@@ -494,9 +478,6 @@ func (s *Session) fail(err error) {
 		s.packetPendingMu.Lock()
 		for id, st := range s.packetPending {
 			delete(s.packetPending, id)
-			if st.timer != nil {
-				st.timer.Stop()
-			}
 			select {
 			case st.resCh <- queryResult{err: err}:
 			default:
