@@ -25,6 +25,10 @@ const (
 	idlePingCheckEvery = time.Second
 )
 
+var (
+	ErrSessionClosed = errors.New("session closed")
+)
+
 // Session implements the cocoon TcpConnection framing layer over an established Conn.
 //
 // Wire format per packet: [uint32 LE size][uint32 LE seqno][payload]
@@ -128,7 +132,7 @@ func New(conn *proxyconn.Conn) (*Session, error) {
 
 // Close closes the underlying connection and all background loops.
 func (s *Session) Close() error {
-	err := s.sessionErrOr(errors.New("session closed"))
+	err := s.sessionErrOr()
 	s.fail(err)
 	return s.conn.Close()
 }
@@ -163,7 +167,7 @@ func (s *Session) MakeRequest(ctx context.Context, msg []byte) ([]byte, error) {
 		return nil, ctx.Err()
 	case <-s.doneCh:
 		s.dropPending(queryID)
-		return nil, s.sessionErrOr(errors.New("session closed"))
+		return nil, s.sessionErrOr()
 	case res := <-resCh:
 		return res.data, res.err
 	}
@@ -198,12 +202,12 @@ func (s *Session) RunClientQueryEx(ctx context.Context, model string, query []by
 	payload := make([]byte, 4+len(body))
 	binary.LittleEndian.PutUint32(payload[:4], req.CRC())
 	copy(payload[4:], body)
-	return s.MakePacketRequest(ctx, payload, reqID)
+	return s.doPacketRequest(ctx, payload, reqID)
 }
 
-// MakePacketRequest sends payload as tcp.packet and correlates response chunks
+// doPacketRequest sends payload as tcp.packet and correlates response chunks
 // by requestID from client.queryAnswerPartEx/client.queryAnswerEx.
-func (s *Session) MakePacketRequest(ctx context.Context, payload []byte, requestID [32]byte) ([]byte, error) {
+func (s *Session) doPacketRequest(ctx context.Context, payload []byte, requestID [32]byte) ([]byte, error) {
 	resCh := make(chan queryResult, 1)
 
 	s.packetPendingMu.Lock()
@@ -225,7 +229,7 @@ func (s *Session) MakePacketRequest(ctx context.Context, payload []byte, request
 		return nil, ctx.Err()
 	case <-s.doneCh:
 		s.dropPacketPending(requestID)
-		return nil, s.sessionErrOr(errors.New("session closed"))
+		return nil, s.sessionErrOr()
 	case res := <-resCh:
 		return res.data, res.err
 	}
@@ -235,7 +239,7 @@ func (s *Session) MakePacketRequest(ctx context.Context, payload []byte, request
 func (s *Session) RecvPacket() ([]byte, error) {
 	select {
 	case <-s.doneCh:
-		return nil, s.sessionErrOr(errors.New("session closed"))
+		return nil, s.sessionErrOr()
 	case p := <-s.packetCh:
 		return p, nil
 	}
@@ -249,7 +253,7 @@ func (s *Session) sendPacket(ctx context.Context, packet tlObject) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-s.doneCh:
-		return s.sessionErrOr(errors.New("session closed"))
+		return s.sessionErrOr()
 	case s.writeCh <- req:
 	}
 
@@ -257,9 +261,19 @@ func (s *Session) sendPacket(ctx context.Context, packet tlObject) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-s.doneCh:
-		return s.sessionErrOr(errors.New("session closed"))
+		return s.sessionErrOr()
 	case err := <-ackCh:
 		return err
+	}
+}
+
+// Err returns a terminal session error when the session is closed, otherwise nil.
+func (s *Session) Err() error {
+	select {
+	case <-s.doneCh:
+		return s.sessionErrOr()
+	default:
+		return nil
 	}
 }
 
@@ -492,13 +506,13 @@ func (s *Session) fail(err error) {
 	})
 }
 
-func (s *Session) sessionErrOr(fallback error) error {
+func (s *Session) sessionErrOr() error {
 	s.errMu.RLock()
 	defer s.errMu.RUnlock()
 	if s.err != nil {
 		return s.err
 	}
-	return fallback
+	return ErrSessionClosed
 }
 
 func (s *Session) markActivity() {

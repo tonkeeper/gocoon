@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -48,7 +47,7 @@ type errorBody struct {
 	} `json:"error"`
 }
 
-type chatRequest struct {
+type modelRequest struct {
 	Model string `json:"model"`
 }
 
@@ -66,8 +65,7 @@ func main() {
 	s := &server{conn: conn, logger: logger}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/models", s.handleModels)
-	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
+	mux.HandleFunc("/", s.handleProxy)
 
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
@@ -116,106 +114,59 @@ func connectCocoon(ctx context.Context, logger *zap.Logger) (*gocoon.Connection,
 	return conn, nil
 }
 
-func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+func (s *server) handleProxy(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		resp, err := s.conn.GET(r.Context(), "Qwen/Qwen3-32B", r.URL.RequestURI())
+		if err != nil {
+			s.writeOpenAIError(w, http.StatusBadGateway, "server_error", fmt.Sprintf("upstream error: %v", err))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(resp)
+	case http.MethodPost:
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			s.writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
+			return
+		}
+
+		model := extractModelFromRequest(r, body)
+		if model == "" {
+			s.writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "model is required (query param `model`, header `X-Model`, or JSON body field `model`)")
+			return
+		}
+
+		resp, err := s.conn.POST(r.Context(), model, r.URL.RequestURI(), body)
+		if err != nil {
+			s.writeOpenAIError(w, http.StatusBadGateway, "server_error", fmt.Sprintf("upstream error: %v", err))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(resp)
+	default:
 		s.writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
-		return
 	}
-
-	workerTypes, err := s.conn.GetWorkerTypes(r.Context())
-	if err != nil {
-		s.writeOpenAIError(w, http.StatusBadGateway, "server_error", fmt.Sprintf("fetch workers: %v", err))
-		return
-	}
-
-	now := time.Now().Unix()
-	models := make([]modelObject, 0, len(workerTypes))
-	seen := make(map[string]struct{}, len(workerTypes))
-	for _, wt := range workerTypes {
-		if len(wt.Workers) == 0 {
-			continue
-		}
-		if _, ok := seen[wt.Name]; ok {
-			continue
-		}
-		seen[wt.Name] = struct{}{}
-		models = append(models, modelObject{
-			ID:      wt.Name,
-			Object:  "model",
-			Created: now,
-			OwnedBy: "gocoon",
-		})
-	}
-
-	writeJSON(w, http.StatusOK, modelsResponse{
-		Object: "list",
-		Data:   models,
-	})
 }
 
-func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
-		return
+func extractModelFromRequest(r *http.Request, body []byte) string {
+	if q := r.URL.Query().Get("model"); q != "" {
+		return q
 	}
-
-	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
-	if err != nil {
-		s.writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
-		return
+	if h := r.Header.Get("X-Model"); h != "" {
+		return h
 	}
-
-	var req chatRequest
+	if len(body) == 0 {
+		return ""
+	}
+	var req modelRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		s.writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON body")
-		return
+		return ""
 	}
-	if req.Model == "" {
-		s.writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
-		return
-	}
-
-	allowed, err := s.isModelAvailable(r.Context(), req.Model)
-	if err != nil {
-		s.writeOpenAIError(w, http.StatusBadGateway, "server_error", fmt.Sprintf("fetch workers: %v", err))
-		return
-	}
-	if !allowed {
-		s.writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "model has no available workers")
-		return
-	}
-
-	resp, err := s.conn.POST(r.Context(), req.Model, "/v1/chat/completions", body)
-	if err != nil {
-		s.writeOpenAIError(w, http.StatusBadGateway, "server_error", fmt.Sprintf("upstream error: %v", err))
-		return
-	}
-
-	// Some upstream responses may prepend non-JSON bytes before the JSON object.
-	if idx := bytes.IndexByte(resp, '{'); idx > 0 {
-		resp = resp[idx:]
-	}
-	if !json.Valid(resp) {
-		s.writeOpenAIError(w, http.StatusBadGateway, "server_error", "upstream returned invalid JSON")
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(resp)
-}
-
-func (s *server) isModelAvailable(ctx context.Context, model string) (bool, error) {
-	workerTypes, err := s.conn.GetWorkerTypes(ctx)
-	if err != nil {
-		return false, err
-	}
-	for _, wt := range workerTypes {
-		if wt.Name == model && len(wt.Workers) > 0 {
-			return true, nil
-		}
-	}
-	return false, nil
+	return req.Model
 }
 
 func (s *server) writeOpenAIError(w http.ResponseWriter, status int, typ, msg string) {

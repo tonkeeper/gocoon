@@ -2,7 +2,9 @@ package gocoon
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 
 	"github.com/tonkeeper/gocoon/internal/session"
 	"github.com/tonkeeper/gocoon/net/proxyconn"
@@ -84,7 +86,7 @@ func (c *Connection) GetWorkerTypes(ctx context.Context) ([]WorkerType, error) {
 	if c.protoVersion != 0 {
 		res, err := c.apiClient.GetWorkerTypesV2(ctx, tlcocoon.ClientGetWorkerTypesV2Request{})
 		if err != nil {
-			return nil, fmt.Errorf("getWorkerTypesV2: %w", err)
+			return nil, c.withClosedSentinel(fmt.Errorf("getWorkerTypesV2: %w", err))
 		}
 		out := make([]WorkerType, len(res.Types))
 		for i, wt := range res.Types {
@@ -103,7 +105,7 @@ func (c *Connection) GetWorkerTypes(ctx context.Context) ([]WorkerType, error) {
 
 	res, err := c.apiClient.GetWorkerTypes(ctx, tlcocoon.ClientGetWorkerTypesRequest{})
 	if err != nil {
-		return nil, fmt.Errorf("getWorkerTypes: %w", err)
+		return nil, c.withClosedSentinel(fmt.Errorf("getWorkerTypes: %w", err))
 	}
 	out := make([]WorkerType, len(res.Types))
 	for i, wt := range res.Types {
@@ -129,7 +131,20 @@ func (c *Connection) runQuery(ctx context.Context, model string, queryBytes []by
 		MinConfigVersion: int32(c.rootVersion),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("runQueryEx: %w", err)
+		return nil, c.withClosedSentinel(fmt.Errorf("runQueryEx: %w", err))
 	}
 	return raw, nil
+}
+
+func (c *Connection) withClosedSentinel(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	if c.sess != nil && c.sess.Err() != nil {
+		return errors.Join(net.ErrClosed, err)
+	}
+	return err
 }
