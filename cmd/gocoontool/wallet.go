@@ -8,11 +8,10 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/tonkeeper/gocoon/contracts/wallet_contract"
 	abiCocoon "github.com/tonkeeper/tongo/abi-tolk/abiGenerated/cocoon"
 	"github.com/tonkeeper/tongo/ton"
 	"go.uber.org/zap"
-
-	cocoonWallet "github.com/tonkeeper/gocoon/pkg/wallet"
 )
 
 func cmdWalletGenerate() {
@@ -20,7 +19,7 @@ func cmdWalletGenerate() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Fprintf(os.Stderr, "generated new key — set PRIVATE_KEY=%s to reuse it\n",
+	fmt.Fprintf(os.Stderr, "generated new key — set COCOON_WALLET_PRIVKEY=%s to reuse it\n",
 		hex.EncodeToString(priv.Seed()))
 }
 
@@ -29,14 +28,14 @@ func cmdWalletDeploy() {
 	defer logger.Sync() //nolint:errcheck
 	ctx := context.Background()
 
-	priv, err := privKeyFromHex(os.Getenv("PRIVATE_KEY"))
+	priv, err := privKeyFromHex(os.Getenv("COCOON_WALLET_PRIVKEY"))
 	if err != nil {
-		logger.Fatal("parse PRIVATE_KEY", zap.Error(err))
+		logger.Fatal("parse COCOON_WALLET_PRIVKEY", zap.Error(err))
 	}
-	ownerAddr := ton.MustParseAccountID(os.Getenv("OWNER_ADDRESS"))
+	ownerAddr := ton.MustParseAccountID(os.Getenv("COCOON_WALLET_OWNER"))
 
 	lc := mustLiteClient()
-	w, err := cocoonWallet.New(priv, ownerAddr, lc)
+	w, err := wallet_contract.New(priv, ownerAddr, lc)
 	if err != nil {
 		logger.Fatal("create wallet", zap.Error(err))
 	}

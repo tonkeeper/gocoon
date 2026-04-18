@@ -37,7 +37,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "commands:")
 	fmt.Fprintln(os.Stderr, "  wallet generate          generate a new Ed25519 private key")
 	fmt.Fprintln(os.Stderr, "  wallet deploy            deploy the cocoon wallet SC on TON")
-	fmt.Fprintln(os.Stderr, "                             env: PRIVATE_KEY, OWNER_ADDRESS")
+	fmt.Fprintln(os.Stderr, "                             env: COCOON_WALLET_PRIVKEY, COCOON_WALLET_OWNER")
 	fmt.Fprintln(os.Stderr, "  wallet state <address>   print wallet SC state")
 	fmt.Fprintln(os.Stderr, "  client state <address>   print client SC state")
 	fmt.Fprintln(os.Stderr, "  proxy state <address>    print proxy SC state")
