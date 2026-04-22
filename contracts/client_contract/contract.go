@@ -48,6 +48,9 @@ func (c *ClientContract) Sync(ctx context.Context, minStake tlb.Coins, logger *z
 	sc := abiCocoon.NewCocoonClient(c.lc, c.lc).WithAccountId(c.addr)
 	accState, _, err := sc.AccountState(ctx)
 	if err != nil {
+		if err.Error() == "account does not exist" {
+			return false, nil
+		}
 		return false, fmt.Errorf("get account state: %w", err)
 	}
 	if accState.Account.SumType != "Account" {
